@@ -1,10 +1,12 @@
 {
     "manifest_version":  3,
-    "name":  "HLS Video Downloader",
+    "name":  "Video Downloader -HLS-",
     "version":  "0.1.0",
     "description":  "Detects direct video URLs and HLS playlist URLs in webpages and downloads them for personal use.",
     "permissions":  [
                         "downloads",
+                        "webRequest",
+                        "webRequestBlocking",
                         "activeTab",
                         "tabs",
                         "storage",
@@ -30,7 +32,7 @@
                             }
                         ],
     "action":  {
-                   "default_title":  "HLS Video Downloader",
+                   "default_title":  "Video Downloader -HLS-",
                    "default_icon":  {
                                         "16":  "icons/video-disabled.svg",
                                         "32":  "icons/video-disabled.svg"

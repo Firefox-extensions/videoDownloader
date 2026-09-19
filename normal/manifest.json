@@ -1,10 +1,12 @@
 {
     "manifest_version":  3,
-    "name":  "Personal Video Downloader",
+    "name":  "Video Downloader",
     "version":  "0.1.0",
     "description":  "Detects direct video URLs in webpages and downloads them for personal use.",
     "permissions":  [
                         "downloads",
+                        "webRequest",
+                        "webRequestBlocking",
                         "activeTab",
                         "tabs",
                         "storage",

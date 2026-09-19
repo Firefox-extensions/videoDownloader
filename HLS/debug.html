@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>Video Downloader HLS Debug</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 24px;
+        background: #111827;
+        color: #f3f4f6;
+      }
+      .box {
+        max-width: 700px;
+        padding: 20px;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        background: #1f2937;
+      }
+      a {
+        color: #93c5fd;
+      }
+      button {
+        margin-top: 12px;
+        padding: 8px 12px;
+        border: 1px solid #60a5fa;
+        border-radius: 6px;
+        background: #1d4ed8;
+        color: white;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h2>デバッグ補助ページ</h2>
+      <p>Firefox は拡張の中から Web Console を直接開くことを制限しています。</p>
+      <p>以下のページから開発者ツールを開いて、Console を確認してください。</p>
+      <p><a href="about:debugging#/runtime/this-firefox" target="_blank">Firefox のデバッグページを開く</a></p>
+      <p>その後、Console タブでエラーを確認してください。</p>
+      <button type="button" onclick="window.location.href='about:debugging#/runtime/this-firefox'">開発者ページを開く</button>
+    </div>
+  </body>
+</html>
