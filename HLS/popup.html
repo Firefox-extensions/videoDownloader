@@ -1,0 +1,51 @@
+﻿<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>Video Downloader</title>
+    <style>
+      body {
+        width: 460px;
+        min-height: 340px;
+        margin: 0;
+        padding: 12px;
+        font-family: sans-serif;
+        background: #111827;
+        color: #f3f4f6;
+      }
+      h1 { margin: 0 0 12px; font-size: 18px; }
+      .toolbar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+      .toolbar-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+      .toolbar-row input[type="checkbox"] { accent-color: #2563eb; }
+      .toolbar-row select { border-radius: 6px; border: 1px solid #374151; background: #1f2937; color: #f3f4f6; padding: 6px 8px; }
+      #status { margin: 8px 0 12px; font-size: 12px; color: #cbd5e1; word-break: break-word; }
+      #refresh-btn { width: 100%; border: none; border-radius: 8px; background: #2563eb; color: white; padding: 10px 12px; cursor: pointer; font-size: 14px; margin-bottom: 12px; }
+      #video-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+      .video-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; }
+      .video-info { flex: 1; min-width: 0; }
+      .video-name { font-size: 13px; font-weight: 600; margin-bottom: 4px; overflow-wrap: anywhere; }
+      .video-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: #cbd5e1; }
+      .download-btn { border: 1px solid #60a5fa; border-radius: 6px; background: #1d4ed8; color: white; padding: 8px 10px; cursor: pointer; white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <h1>Video Downloader</h1>
+    <div class="toolbar">
+      <label class="toolbar-row">
+        <span>サイズ不明も表示</span>
+        <input id="show-unknown-toggle" type="checkbox" checked />
+      </label>
+      <label class="toolbar-row">
+        <span>表示順</span>
+        <select id="sort-order">
+          <option value="desc">大きい順</option>
+          <option value="asc">小さい順</option>
+        </select>
+      </label>
+    </div>
+    <button id="refresh-btn">動画を再検出</button>
+    <div id="status">読み込み中...</div>
+    <ul id="video-list"></ul>
+    <script src="popup.js"></script>
+  </body>
+</html>

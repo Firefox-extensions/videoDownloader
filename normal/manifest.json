@@ -1,0 +1,44 @@
+{
+    "manifest_version":  3,
+    "name":  "Personal Video Downloader",
+    "version":  "0.1.0",
+    "description":  "Detects direct video URLs in webpages and downloads them for personal use.",
+    "permissions":  [
+                        "downloads",
+                        "activeTab",
+                        "tabs",
+                        "storage",
+                        "scripting"
+                    ],
+    "host_permissions":  [
+                             "\u003call_urls\u003e"
+                         ],
+    "background":  {
+                       "scripts":  [
+                                       "background.js"
+                                   ]
+                   },
+    "content_scripts":  [
+                            {
+                                "matches":  [
+                                                "\u003call_urls\u003e"
+                                            ],
+                                "js":  [
+                                           "content.js"
+                                       ],
+                                "run_at":  "document_idle"
+                            }
+                        ],
+    "action":  {
+                   "default_title":  "Video Downloader",
+                   "default_icon":  {
+                                        "16":  "icons/video-disabled.svg",
+                                        "32":  "icons/video-disabled.svg"
+                                    }
+               },
+    "browser_specific_settings":  {
+                                      "gecko":  {
+                                                    "id":  "personal-video-downloader@example.local"
+                                                }
+                                  }
+}
