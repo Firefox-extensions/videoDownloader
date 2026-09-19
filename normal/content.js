@@ -147,14 +147,12 @@ async function showVideoList() {
       #personal-video-downloader-panel .info{min-width:0;flex:1}
       #personal-video-downloader-panel .name{font-weight:600;overflow-wrap:anywhere}
       #personal-video-downloader-panel .meta{margin-top:4px;color:#cbd5e1;font-size:12px}
-      #personal-video-downloader-panel .debug{margin-top:10px;background:#374151;border-color:#6b7280;font-size:12px}
     </style>
     <header>
       <span>Video Downloader</span>
       <button class="close" type="button">閉じる</button>
     </header>
     <div class="status">検出中...</div>
-    <button class="debug" type="button">デバッグページを開く</button>
     <ul></ul>
   `;
   document.documentElement.appendChild(panel);
@@ -162,11 +160,6 @@ async function showVideoList() {
   panel.querySelector('.close').addEventListener('click', (event) => {
     event.stopPropagation();
     closeVideoList();
-  });
-  panel.querySelector('.debug').addEventListener('click', async (event) => {
-    event.stopPropagation();
-    const response = await browser.runtime.sendMessage({ type: 'openDebugPage' });
-    if (!response?.ok) return;
   });
 
   const videos = collectVideoSources();

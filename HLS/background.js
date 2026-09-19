@@ -407,15 +407,8 @@ async function downloadDirectVideo(url, fileName, pageUrl) {
   }
 }
 
-// content.js、デバッグボタン、ダウンロード操作からのメッセージを処理する。
+// content.jsとダウンロード操作からのメッセージを処理する。
 browser.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
-  if (message && message.type === 'openDebugPage') {
-    const debugUrl = browser.runtime.getURL('debug.html');
-    await browser.tabs.create({ url: debugUrl });
-    sendResponse({ ok: true });
-    return false;
-  }
-
   if (message && message.type === 'getVideoSize') {
     try {
       sendResponse({ ok: true, size: await getRemoteFileSize(message.url, message.pageUrl) });
