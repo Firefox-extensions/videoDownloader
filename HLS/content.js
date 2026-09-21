@@ -7,6 +7,42 @@ function sanitizeUrl(value) {
   }
 }
 
+function inferQualityLabel(url, title = '', element = null) {
+  if (element && element.videoHeight && element.videoWidth) {
+    const height = Number(element.videoHeight);
+    if (Number.isFinite(height) && height > 0) return `画質: ${height}p`;
+  }
+
+  const candidate = [url, title].join(' ');
+  const patterns = [
+    /(\d{3,4})p/i,
+    /(\d{3,4})x(\d{3,4})/i,
+    /(?:quality|q|resolution|res|height|h)=([0-9]{3,4})/i,
+    /([0-9]{3,4})\s*fps/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = candidate.match(pattern);
+    if (!match) continue;
+    const value = match[1] || match[2] || match[0];
+    if (Number(value) >= 240 && Number(value) <= 4320) {
+      return `画質: ${Number(value)}p`;
+    }
+  }
+
+  return '画質: 不明';
+}
+
+function parseHlsBandwidth(url, text = '') {
+  const match = text.match(/BANDWIDTH=(\d+)/i) || text.match(/(?:\b|_)(\d{4,7})(?=\s*(?:,|$))/i);
+  if (!match) return null;
+  const bandwidth = Number(match[1]);
+  if (!Number.isFinite(bandwidth) || bandwidth <= 0) return null;
+  const height = /RESOLUTION=(\d+)x(\d+)/i.exec(text)?.[2];
+  if (height) return { bandwidth, height: Number(height) };
+  return { bandwidth, height: null };
+}
+
 // URLやMIME情報から、候補がHLSプレイリストかどうかを判定する。
 function isHlsUrl(url) {
   const lower = (url || '').toLowerCase();
@@ -18,32 +54,68 @@ function collectVideoSources() {
   const seen = new Set();
   const results = [];
 
-  const addUrl = (sourceUrl, label = 'video', type = 'direct') => {
+  const addUrl = (sourceUrl, label = 'video', type = 'direct', qualityOverride = null) => {
     const normalized = sanitizeUrl(sourceUrl);
     if (!normalized || seen.has(normalized)) return;
 
     seen.add(normalized);
-    results.push({ title: label || 'Video', url: normalized, type });
+    results.push({
+      title: label || 'Video',
+      url: normalized,
+      type,
+      quality: qualityOverride || inferQualityLabel(normalized, label)
+    });
   };
 
   document.querySelectorAll('video').forEach((video) => {
-    if (video.src) addUrl(video.src, video.title || 'Video', isHlsUrl(video.src) ? 'hls' : 'direct');
-    if (video.currentSrc) addUrl(video.currentSrc, video.title || 'Video', isHlsUrl(video.currentSrc) ? 'hls' : 'direct');
+    const quality = inferQualityLabel(video.currentSrc || video.src || '', video.title || '', video);
+    if (video.src) addUrl(video.src, video.title || 'Video', isHlsUrl(video.src) ? 'hls' : 'direct', quality);
+    if (video.currentSrc) addUrl(video.currentSrc, video.title || 'Video', isHlsUrl(video.currentSrc) ? 'hls' : 'direct', quality);
     video.querySelectorAll('source').forEach((source) => {
-      if (source.src) addUrl(source.src, source.title || 'Video', isHlsUrl(source.src) ? 'hls' : 'direct');
+      if (source.src) addUrl(source.src, source.title || 'Video', isHlsUrl(source.src) ? 'hls' : 'direct', inferQualityLabel(source.src, source.title || '', video));
     });
   });
 
   document.querySelectorAll('source').forEach((source) => {
-    if (source.src) addUrl(source.src, source.title || 'Video', isHlsUrl(source.src) ? 'hls' : 'direct');
+    if (source.src) addUrl(source.src, source.title || 'Video', isHlsUrl(source.src) ? 'hls' : 'direct', inferQualityLabel(source.src, source.title || ''));
   });
 
   Array.from(document.querySelectorAll('a, script')).forEach((element) => {
     const value = element.src || element.href || '';
-    if (isHlsUrl(value)) addUrl(value, 'HLS Playlist', 'hls');
+    if (!isHlsUrl(value)) return;
+
+    const quality = (() => {
+      const text = element.textContent || element.innerHTML || '';
+      const meta = parseHlsBandwidth(value, text);
+      if (meta?.height) return `画質: ${meta.height}p`;
+      if (meta?.bandwidth) return `画質: ${Math.round(meta.bandwidth / 1000)}kbps`;
+      return inferQualityLabel(value, 'HLS Playlist');
+    })();
+
+    addUrl(value, 'HLS Playlist', 'hls', quality);
   });
 
   return results;
+}
+
+function findPageSize(url) {
+  const elements = [...document.querySelectorAll('video, source, a')];
+  const sizeAttributes = ['data-size', 'data-filesize', 'data-file-size', 'filesize', 'size'];
+  for (const element of elements) {
+    const elementUrl = element.currentSrc || element.src || element.href || '';
+    if (elementUrl !== url) continue;
+    for (const attribute of sizeAttributes) {
+      const value = element.getAttribute(attribute);
+      if (value) return value;
+    }
+  }
+
+  const metadata = [...document.querySelectorAll('meta')];
+  for (const element of metadata) {
+    const name = `${element.getAttribute('name') || ''} ${element.getAttribute('property') || ''}`;
+    if (/size|filesize|content-length/i.test(name) && element.content) return element.content;
+  }
+  return '';
 }
 
 // 候補数をbackground.jsへ通知し、拡張機能アイコンの状態を更新する。
@@ -66,25 +138,54 @@ new MutationObserver(scheduleActionStateUpdate).observe(document.documentElement
   attributeFilter: ['src', 'href']
 });
 
-browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+// background.jsからの動画一覧要求に応答する。同期で返せるためPromiseで包んで返す。
+browser.runtime.onMessage.addListener((message) => {
   if (message && message.type === 'getVideos') {
-    sendResponse({ videos: collectVideoSources() });
-    return true;
+    return Promise.resolve({ videos: collectVideoSources() });
   }
-  return false;
+  return undefined;
 });
 
 
 const PANEL_ID = 'personal-video-downloader-panel';
 
 // サイズ取得はbackground.jsへ依頼し、ページ側のCORS制限を避ける。
-async function getDisplaySize(url) {
+async function getDisplaySize(url, knownSize = '') {
+  if (knownSize) {
+    const bytes = Number(knownSize);
+    return Number.isFinite(bytes) && bytes > 0 ? formatDisplayBytes(bytes) : knownSize;
+  }
+  if (url.startsWith('blob:')) {
+    try {
+      const blobResponse = await fetch(url);
+      const blob = await blobResponse.blob();
+      return formatDisplayBytes(blob.size);
+    } catch (error) {
+      return '不明';
+    }
+  }
+
   try {
-    const response = await browser.runtime.sendMessage({ type: 'getVideoSize', url });
+    const response = await browser.runtime.sendMessage({
+      type: 'getVideoSize',
+      url,
+      pageUrl: window.location.href
+    });
     return response?.size || '不明';
   } catch (error) {
     return '不明';
   }
+}
+
+function formatDisplayBytes(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(index === 0 ? 0 : value >= 10 ? 0 : 1)} ${units[index]}`;
 }
 
 // URLの末尾を一覧上の表示名として使う。
@@ -95,6 +196,14 @@ function getDisplayName(url) {
   } catch (error) {
     return 'video';
   }
+}
+
+function parseDisplaySize(value) {
+  const match = String(value || '').match(/^([\d.]+)\s*(B|KB|MB|GB)$/i);
+  if (!match) return null;
+
+  const units = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 };
+  return Number(match[1]) * units[match[2].toUpperCase()];
 }
 
 // CORSなどの技術的なエラーを、一覧上で読めるメッセージへ整える。
@@ -111,7 +220,7 @@ function formatDownloadErrorMessage(message, url) {
     }
 
   } catch (error) {
-    // no-op
+    // なにもしない
   }
 
   return `ダウンロードに失敗しました: ${safeMessage}`;
@@ -166,14 +275,27 @@ async function showVideoList() {
     <div class="status">検出中...</div>
     <ul></ul>
   `;
+  const candidates = collectVideoSources()
+    .map(async (video) => ({ video, sizeText: await getDisplaySize(video.url, findPageSize(video.url)) }));
+  const sizedVideos = await Promise.all(candidates);
+  const videos = sizedVideos
+    .filter(({ sizeText }) => {
+      const size = parseDisplaySize(sizeText);
+      return size === null || size > 100 * 1024;
+    })
+    .map(({ video, sizeText }) => ({ ...video, sizeText }))
+    .sort((a, b) => {
+      const qualityA = parseInt((a.quality || '画質: 不明').match(/(\d{3,4})p/i)?.[1] || '0', 10);
+      const qualityB = parseInt((b.quality || '画質: 不明').match(/(\d{3,4})p/i)?.[1] || '0', 10);
+      if (qualityA !== qualityB) return qualityB - qualityA;
+      return (b.url || '').length - (a.url || '').length;
+    });
   document.documentElement.appendChild(panel);
   document.addEventListener('click', handleOutsideClick, true);
   panel.querySelector('.close').addEventListener('click', (event) => {
     event.stopPropagation();
     closeVideoList();
   });
-
-  const videos = collectVideoSources();
   const status = panel.querySelector('.status');
   const list = panel.querySelector('ul');
 
@@ -195,7 +317,9 @@ async function showVideoList() {
 
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = `${video.type === 'hls' ? '種類: HLS' : '種類: 直接再生'} / サイズ: ${await getDisplaySize(video.url)}`;
+    const qualityText = video.quality && video.quality !== '画質: 不明' ? video.quality.replace(/^画質:\s*/, '') : '不明';
+    const sizeText = video.sizeText;
+    meta.textContent = `${video.type === 'hls' ? 'HLS' : '直接再生'} / 画質: ${qualityText} / サイズ: ${sizeText}`;
 
     // 保存ボタンを押した時点で一覧を閉じ、保存処理をバックグラウンドへ渡す。
     const save = document.createElement('button');

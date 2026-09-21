@@ -40,7 +40,7 @@
                },
     "browser_specific_settings":  {
                                       "gecko":  {
-                                                    "id":  "personal-video-downloader@example.local"
+                                                    "id":  "video-downloader@example.local"
                                                 }
                                   }
 }
