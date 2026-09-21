@@ -82,12 +82,59 @@ function formatBytes(bytes) {
 
 const mediaSizes = new Map();
 const capturedMedia = new Map();
+const mediaCandidates = new Map();
+const hlsCandidates = new Map();
 const MAX_CAPTURE_BYTES = 256 * 1024 * 1024;
 const pendingReferers = new Map();
 
 // 直接保存の対象にする動画ファイルURLを判定する。
 function isDirectMediaUrl(url) {
   return /\.(mp4|webm|m4v|mov)(?:$|[?#])/i.test(url);
+}
+
+// HLSプレイリストURLを判定する。
+function isHlsCandidateUrl(url) {
+  return /\.m3u8(?:$|[?#])/i.test(url || '');
+}
+
+// 拡張子がなくても動画の可能性があるURLを拾う。
+function isLikelyMediaUrl(url) {
+  if (!url || /^(blob:|data:|javascript:|about:)/i.test(url)) return false;
+  if (isDirectMediaUrl(url) || isHlsCandidateUrl(url)) return true;
+  try {
+    const parsed = new URL(url);
+    const target = `${parsed.pathname}${parsed.search}`.toLowerCase();
+    return /(video|movie|media|mp4|webm|m4v|mov|m3u8|stream|download|play)/.test(target)
+      || /\/(240|360|480|720|1080|2160)p?([/?_.-]|$)/.test(target);
+  } catch (error) {
+    return false;
+  }
+}
+
+// ネットワークで観測した動画URLをタブごとの候補として残す。
+function rememberMediaCandidate(url, tabId, statusCode = 200) {
+  if (tabId === undefined || tabId < 0) return;
+  if (!isLikelyMediaUrl(url)) return;
+  if (statusCode !== 200 && statusCode !== 206) return;
+
+  const store = isHlsCandidateUrl(url) ? hlsCandidates : mediaCandidates;
+  let candidates = store.get(tabId);
+  if (!candidates) {
+    candidates = new Map();
+    store.set(tabId, candidates);
+  }
+  const key = url.split('#')[0];
+  const existing = candidates.get(key);
+  if (existing) {
+    existing.timestamp = Date.now();
+    return;
+  }
+  candidates.set(key, { url: key, timestamp: Date.now() });
+
+  if (candidates.size > 50) {
+    const oldest = [...candidates.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
+    if (oldest) candidates.delete(oldest[0]);
+  }
 }
 
 // 配信元がページのRefererを要求する場合に、元ページURLをリクエストへ戻す。
@@ -203,6 +250,25 @@ function storeMediaSize(url, size) {
   browser.storage.local.set({ [sizeStorageKey(url)]: value }).catch(() => {});
 }
 
+// 観測済み候補のうち直近のものを返す。
+function getRecentCandidates(store, tabId) {
+  if (tabId === undefined || tabId < 0) return [];
+  const candidates = store.get(tabId);
+  if (!candidates) return [];
+  const now = Date.now();
+  return [...candidates.values()]
+    .filter((candidate) => now - candidate.timestamp < 30 * 60 * 1000)
+    .map((candidate) => candidate.url);
+}
+
+function getMediaCandidates(tabId) {
+  return getRecentCandidates(mediaCandidates, tabId);
+}
+
+function getHlsCandidates(tabId) {
+  return getRecentCandidates(hlsCandidates, tabId);
+}
+
 async function rememberCompletedDownloadSize(downloadId, sourceUrl) {
   try {
     const items = await browser.downloads.search({ id: downloadId });
@@ -293,9 +359,11 @@ async function probeDownloadSize(url, pageUrl = '') {
 
 // 実際の動画レスポンスを通過させながら、一定サイズ以下ならメモリにも保持する。
 // これにより、サイズヘッダーがない配信でも受信済みサイズを利用できる。
+// 同時にタブごとの候補URLも記録し、画質切替ボタン型のページでも一覧に出せるようにする。
 browser.webRequest.onHeadersReceived.addListener(
   (details) => {
     rememberMediaSize(details.url, details.responseHeaders || [], details.statusCode);
+    rememberMediaCandidate(details.url, details.tabId, details.statusCode);
 
     if (details.statusCode !== 200 || !isDirectMediaUrl(details.url)) return;
 
@@ -446,10 +514,19 @@ async function tryRangeSize(url, pageUrl) {
 }
 
 // ページ読み込み開始時は、前ページの動画候補を示さない。
+// タブごとの観測候補も破棄し、別ページのURLが混ざらないようにする。
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') {
+    mediaCandidates.delete(tabId);
+    hlsCandidates.delete(tabId);
     setActionAvailability(tabId, false).catch(() => {});
   }
+});
+
+// タブを閉じたときに観測候補を破棄する。
+browser.tabs.onRemoved.addListener((tabId) => {
+  mediaCandidates.delete(tabId);
+  hlsCandidates.delete(tabId);
 });
 
 // content.jsからの候補数通知を受け、拡張機能ボタンの状態を更新する。
@@ -655,6 +732,13 @@ browser.runtime.onMessage.addListener((message, sender) => {
         return { ok: true, size: '不明' };
       }
     })();
+  }
+
+  if (message && message.type === 'getObservedVideos') {
+    return Promise.resolve({
+      videos: getMediaCandidates(sender?.tab?.id),
+      hlsVideos: getHlsCandidates(sender?.tab?.id)
+    });
   }
 
   if (message && message.type === 'downloadVideo') {

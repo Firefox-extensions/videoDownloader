@@ -50,13 +50,14 @@ function isHlsUrl(url) {
 }
 
 // video/source要素とページ内リンクから、直リンクとHLS候補を収集する。
+// 画質切替ボタンやJS設定値も拾い、切り替え操作なしで全画質を出す。
 function collectVideoSources() {
   const seen = new Set();
   const results = [];
 
   const addUrl = (sourceUrl, label = 'video', type = 'direct', qualityOverride = null) => {
     const normalized = sanitizeUrl(sourceUrl);
-    if (!normalized || seen.has(normalized)) return;
+    if (!normalized || normalized.startsWith('blob:') || seen.has(normalized)) return;
 
     seen.add(normalized);
     results.push({
@@ -73,12 +74,20 @@ function collectVideoSources() {
     if (video.currentSrc) addUrl(video.currentSrc, video.title || 'Video', isHlsUrl(video.currentSrc) ? 'hls' : 'direct', quality);
     video.querySelectorAll('source').forEach((source) => {
       if (source.src) addUrl(source.src, source.title || 'Video', isHlsUrl(source.src) ? 'hls' : 'direct', inferQualityLabel(source.src, source.title || '', video));
+      if (source.srcset) collectSrcsetUrls(source.srcset, source.title || 'Video', addUrl);
     });
   });
 
   document.querySelectorAll('source').forEach((source) => {
     if (source.src) addUrl(source.src, source.title || 'Video', isHlsUrl(source.src) ? 'hls' : 'direct', inferQualityLabel(source.src, source.title || ''));
+    if (source.srcset) collectSrcsetUrls(source.srcset, source.title || 'Video', addUrl);
   });
+  // data-srcなどの遅延読み込み属性や画質切替ボタンの属性からURLを収集する。
+  collectLazyAndQualityAttributes(addUrl);
+
+  // ページ内のJSON設定から画質別URLを収集する。
+  collectEmbeddedPlayerUrls(addUrl);
+
 
   Array.from(document.querySelectorAll('a, script')).forEach((element) => {
     const value = element.src || element.href || '';
@@ -96,6 +105,144 @@ function collectVideoSources() {
   });
 
   return results;
+
+// data-srcなどの遅延読み込み属性や画質切替ボタンの属性からURLを収集する。
+function collectLazyAndQualityAttributes(addUrl) {
+  const urlAttributes = [
+    'data-src', 'data-source', 'data-video', 'data-video-url', 'data-video-src',
+    'data-url', 'data-file', 'data-media', 'data-stream', 'data-playlist'
+  ];
+
+  const targets = document.querySelectorAll('video, source, a, button, [data-src], [data-video-url], [data-video-src]');
+  targets.forEach((element) => {
+    for (const name of urlAttributes) {
+      const value = element.getAttribute && element.getAttribute(name);
+      if (value) collectUrlsFromText(value, element.textContent || 'Video', addUrl);
+    }
+
+    if (/^(BUTTON|A|LI|OPTION)$/.test(element.tagName || '')) {
+      for (const attribute of element.attributes || []) {
+        if (/^(src|href|data-)/i.test(attribute.name) && looksLikeMediaUrl(attribute.value)) {
+          collectUrlsFromText(attribute.value, element.textContent || 'Video', addUrl);
+        }
+      }
+    }
+  });
+}
+
+// ページ内スクリプトのJSON設定から画質別URLを収集する。
+function collectEmbeddedPlayerUrls(addUrl) {
+  const texts = [];
+  document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]').forEach((script) => {
+    if (script.textContent) texts.push(script.textContent);
+  });
+  document.querySelectorAll('script:not([src])').forEach((script) => {
+    const text = script.textContent || '';
+    if (text.length < 200000 && /(\.mp4|\.webm|\.m3u8|720p|1080p|sources)/i.test(text)) {
+      texts.push(text);
+    }
+  });
+
+  for (const text of texts) {
+    try {
+      collectUrlsFromJson(JSON.parse(text), addUrl);
+    } catch (error) {
+      // なにもしない
+    }
+    collectUrlsFromText(text, 'Video', addUrl);
+  }
+}
+
+// JSON中のfile/src/urlなどから動画URLを取り出す。
+function collectUrlsFromJson(node, addUrl, depth = 0) {
+  if (!node || depth > 6) return;
+  if (typeof node === 'string') {
+    if (looksLikeMediaUrl(node)) collectUrlsFromText(node, 'Video', addUrl);
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) collectUrlsFromJson(item, addUrl, depth + 1);
+    return;
+  }
+  if (typeof node === 'object') {
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value === 'string' && /^(file|src|source|url|contentUrl|videoUrl)$/i.test(key)) {
+        if (looksLikeMediaUrl(value)) collectUrlsFromText(value, 'Video', addUrl);
+      } else {
+        collectUrlsFromJson(value, addUrl, depth + 1);
+      }
+      if (value && typeof value === 'object' && typeof value.file === 'string' && looksLikeMediaUrl(value.file)) {
+        const quality = value.label || value.quality || '';
+        collectUrlsFromText(value.file, String(quality || 'Video'), addUrl);
+      }
+    }
+  }
+}
+
+// テキスト断片からhttp(s)動画URLを抜き出す。
+function collectUrlsFromText(text, label, addUrl) {
+  if (!text) return;
+  const matches = String(text).match(/https?:\/\/[^\s"'<>]+\.(?:mp4|webm|m4v|mov|m3u8)(?:[?#][^\s"'<>]*)?/gi) || [];
+  for (const match of matches) {
+    const cleaned = match.replace(/\\\//g, '/');
+    addUrl(cleaned, label, isHlsUrl(cleaned) ? 'hls' : 'direct');
+  }
+}
+
+// background.jsで観測したネットワーク由来の候補も取り込む。
+// content.jsだけでは見えない画質別URL(自動再生で読み込まれた分など)を補う。
+async function getObservedVideos() {
+  try {
+    const response = await browser.runtime.sendMessage({ type: 'getObservedVideos' });
+    const videos = response?.videos;
+    const hlsVideos = response?.hlsVideos;
+    const merged = [];
+    if (Array.isArray(videos)) merged.push(...videos.map((url) => ({ url, type: 'direct' })));
+    if (Array.isArray(hlsVideos)) merged.push(...hlsVideos.map((url) => ({ url, type: 'hls' })));
+    return merged;
+  } catch (error) {
+    return [];
+  }
+}
+
+async function collectAllVideoSources() {
+  const domVideos = collectVideoSources();
+  const seen = new Set(domVideos.map((video) => video.url));
+  const observed = await getObservedVideos();
+
+  for (const item of observed) {
+    const normalized = sanitizeUrl(item.url);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    domVideos.push({
+      title: 'Video',
+      url: normalized,
+      type: item.type || (isHlsUrl(normalized) ? 'hls' : 'direct'),
+      quality: inferQualityLabel(normalized, '')
+    });
+  }
+
+  return domVideos;
+}
+
+
+// srcset形式から動画URLを取り出す。
+function collectSrcsetUrls(srcset, label, addUrl) {
+  for (const part of String(srcset).split(',')) {
+    const token = part.trim().split(/\s+/)[0];
+    if (token) addUrl(token, label, isHlsUrl(token) ? 'hls' : 'direct');
+  }
+}
+
+// 拡張子付きでなくても動画URLらしいかを判定する。
+function looksLikeMediaUrl(value) {
+  if (!value || typeof value !== 'string') return false;
+  const normalized = value.trim();
+  if (!normalized || /^(blob:|data:|javascript:|#)/i.test(normalized)) return false;
+  if (/\.(mp4|webm|m4v|mov|m3u8)(?:[?#]|$)/i.test(normalized)) return true;
+  return /(video|movie|media|stream|m3u8|720p|1080p|480p|360p)/i.test(normalized) && /^https?:\/\//i.test(normalized);
+}
+
 }
 
 function findPageSize(url) {
@@ -119,13 +266,31 @@ function findPageSize(url) {
 }
 
 // 候補数をbackground.jsへ通知し、拡張機能アイコンの状態を更新する。
+// DOM候補と観測候補の合算で判定する。
 function updateActionState() {
+  collectAllVideoSources().then((videos) => {
+    browser.runtime.sendMessage({ type: 'videoCandidatesChanged', count: videos.length }).catch(() => {});
+  }).catch(() => {});
+}
+
+}
+
+// 候補数をbackground.jsへ通知し、拡張機能アイコンの状態を更新する。
+function updateActionStateOldUnused2b() {
+// 候補数をbackground.jsへ通知し、拡張機能アイコンの状態を更新する。
+// DOM候補と観測候補の合算で判定する。
+function updateActionStateNewUnused2b() {
+  collectAllVideoSources().then((videos) => {
+    browser.runtime.sendMessage({ type: 'videoCandidatesChanged', count: videos.length }).catch(() => {});
+  }).catch(() => {});
+}
+
   const count = collectVideoSources().length;
   browser.runtime.sendMessage({ type: 'videoCandidatesChanged', count }).catch(() => {});
 }
 
 let updateTimer;
-function scheduleActionStateUpdate() {
+function scheduleActionStateUpdateUnused() {
   clearTimeout(updateTimer);
   updateTimer = setTimeout(updateActionState, 200);
 }
@@ -138,10 +303,10 @@ new MutationObserver(scheduleActionStateUpdate).observe(document.documentElement
   attributeFilter: ['src', 'href']
 });
 
-// background.jsからの動画一覧要求に応答する。同期で返せるためPromiseで包んで返す。
+// background.jsからの動画一覧要求に応答する。観測候補も含めて返す。
 browser.runtime.onMessage.addListener((message) => {
   if (message && message.type === 'getVideos') {
-    return Promise.resolve({ videos: collectVideoSources() });
+    return collectAllVideoSources().then((videos) => ({ videos }));
   }
   return undefined;
 });

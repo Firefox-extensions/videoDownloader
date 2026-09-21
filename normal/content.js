@@ -34,13 +34,14 @@ function inferQualityLabel(url, title = '', element = null) {
 }
 
 // video/source要素から動画URLを集め、同じURLは一度だけ候補にする。
+// 画質切替ボタンやJS設定値も拾い、切り替え操作なしで全画質を出す。
 function collectVideoSources() {
   const seen = new Set();
   const results = [];
 
   const addUrl = (sourceUrl, label = 'video', qualityOverride = null) => {
     const normalized = sanitizeUrl(sourceUrl);
-    if (!normalized || seen.has(normalized)) return;
+    if (!normalized || normalized.startsWith('blob:') || seen.has(normalized)) return;
 
     seen.add(normalized);
     results.push({
@@ -51,20 +52,129 @@ function collectVideoSources() {
     });
   };
 
+  // video要素のsrc/currentSrc/source子要素から収集する。
   document.querySelectorAll('video').forEach((video) => {
     const quality = inferQualityLabel(video.currentSrc || video.src || '', video.title || '', video);
     if (video.src) addUrl(video.src, video.title || 'Video', quality);
     if (video.currentSrc) addUrl(video.currentSrc, video.title || 'Video', quality);
     video.querySelectorAll('source').forEach((source) => {
       if (source.src) addUrl(source.src, source.title || 'Video', inferQualityLabel(source.src, source.title || '', video));
+      if (source.srcset) collectSrcsetUrls(source.srcset, source.title || 'Video', addUrl);
     });
   });
 
   document.querySelectorAll('source').forEach((source) => {
     if (source.src) addUrl(source.src, source.title || 'Video', inferQualityLabel(source.src, source.title || ''));
+    if (source.srcset) collectSrcsetUrls(source.srcset, source.title || 'Video', addUrl);
   });
 
+  // data-srcなどの遅延読み込み属性や、画質切替ボタンが持つURLを収集する。
+  collectLazyAndQualityAttributes(addUrl);
+
+  // ページ内のJSON設定から画質別URLを収集する。
+  collectEmbeddedPlayerUrls(addUrl);
+
   return results;
+}
+
+// data-srcなどの遅延読み込み属性や画質切替ボタンの属性からURLを収集する。
+function collectLazyAndQualityAttributes(addUrl) {
+  const urlAttributes = [
+    'data-src', 'data-source', 'data-video', 'data-video-url', 'data-video-src',
+    'data-url', 'data-file', 'data-media', 'data-stream', 'data-playlist'
+  ];
+
+  const targets = document.querySelectorAll('video, source, a, button, [data-src], [data-video-url], [data-video-src]');
+  targets.forEach((element) => {
+    for (const name of urlAttributes) {
+      const value = element.getAttribute && element.getAttribute(name);
+      if (value) collectUrlsFromText(value, element.textContent || 'Video', addUrl);
+    }
+
+    // 画質切替ボタン自体がURLを持つ場合に備え、data-*属性を広く調べる。
+    if (/^(BUTTON|A|LI|OPTION)$/.test(element.tagName || '')) {
+      for (const attribute of element.attributes || []) {
+        if (/^(src|href|data-)/i.test(attribute.name) && looksLikeMediaUrl(attribute.value)) {
+          collectUrlsFromText(attribute.value, element.textContent || 'Video', addUrl);
+        }
+      }
+    }
+  });
+}
+
+// srcset形式(カンマ区切りのURL群)から動画URLを取り出す。
+function collectSrcsetUrls(srcset, label, addUrl) {
+  for (const part of String(srcset).split(',')) {
+    const token = part.trim().split(/\s+/)[0];
+    if (token) addUrl(token, label);
+  }
+}
+
+// ページ内スクリプトのJSON設定から画質別URLを収集する。
+function collectEmbeddedPlayerUrls(addUrl) {
+  const texts = [];
+  document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]').forEach((script) => {
+    if (script.textContent) texts.push(script.textContent);
+  });
+  document.querySelectorAll('script:not([src])').forEach((script) => {
+    const text = script.textContent || '';
+    if (text.length < 200000 && /(\.mp4|\.webm|720p|1080p|sources?\s*:|videoUrl)/i.test(text)) {
+      texts.push(text);
+    }
+  });
+
+  for (const text of texts) {
+    try {
+      collectUrlsFromJson(JSON.parse(text), addUrl);
+    } catch (error) {
+      // なにもしない
+    }
+    collectUrlsFromText(text, 'Video', addUrl);
+  }
+}
+
+// JSON中のfile/src/urlなどから動画URLを取り出す。
+function collectUrlsFromJson(node, addUrl, depth = 0) {
+  if (!node || depth > 6) return;
+  if (typeof node === 'string') {
+    if (looksLikeMediaUrl(node)) collectUrlsFromText(node, 'Video', addUrl);
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) collectUrlsFromJson(item, addUrl, depth + 1);
+    return;
+  }
+  if (typeof node === 'object') {
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value === 'string' && /^(file|src|source|url|contentUrl|videoUrl)$/i.test(key)) {
+        if (looksLikeMediaUrl(value)) collectUrlsFromText(value, 'Video', addUrl);
+      } else {
+        collectUrlsFromJson(value, addUrl, depth + 1);
+      }
+      if (value && typeof value === 'object' && typeof value.file === 'string' && looksLikeMediaUrl(value.file)) {
+        const quality = value.label || value.quality || '';
+        collectUrlsFromText(value.file, String(quality || 'Video'), addUrl);
+      }
+    }
+  }
+}
+
+// テキスト断片からhttp(s)動画URLを抜き出す。
+function collectUrlsFromText(text, label, addUrl) {
+  if (!text) return;
+  const matches = String(text).match(/https?:\/\/[^\s"'<>]+\.(?:mp4|webm|m4v|mov)(?:[?#][^\s"'<>]*)?/gi) || [];
+  for (const match of matches) {
+    addUrl(match.replace(/\\\//g, '/'), label);
+  }
+}
+
+// 拡張子付きでなくても動画URLらしいかを判定する。
+function looksLikeMediaUrl(value) {
+  if (!value || typeof value !== 'string') return false;
+  const normalized = value.trim();
+  if (!normalized || /^(blob:|data:|javascript:|#)/i.test(normalized)) return false;
+  if (/\.(mp4|webm|m4v|mov)(?:[?#]|$)/i.test(normalized)) return true;
+  return /(video|movie|media|stream|720p|1080p|480p|360p)/i.test(normalized) && /^https?:\/\//i.test(normalized);
 }
 
 function findPageSize(url) {
@@ -87,10 +197,43 @@ function findPageSize(url) {
   return '';
 }
 
+// background.jsで観測したネットワーク由来の候補も取り込む。
+// content.jsだけでは見えない画質別URL(自動再生で読み込まれた分など)を補う。
+async function getObservedVideos() {
+  try {
+    const response = await browser.runtime.sendMessage({ type: 'getObservedVideos' });
+    const videos = response?.videos;
+    return Array.isArray(videos) ? videos : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+async function collectAllVideoSources() {
+  const domVideos = collectVideoSources();
+  const seen = new Set(domVideos.map((video) => video.url));
+  const observedUrls = await getObservedVideos();
+
+  for (const url of observedUrls) {
+    const normalized = sanitizeUrl(url);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    domVideos.push({
+      title: 'Video',
+      url: normalized,
+      type: 'direct',
+      quality: inferQualityLabel(normalized, '')
+    });
+  }
+
+  return domVideos;
+}
+
 // 候補数をbackground.jsへ通知し、拡張機能アイコンの状態を更新する。
 function updateActionState() {
-  const count = collectVideoSources().length;
-  browser.runtime.sendMessage({ type: 'videoCandidatesChanged', count }).catch(() => {});
+  collectAllVideoSources().then((videos) => {
+    browser.runtime.sendMessage({ type: 'videoCandidatesChanged', count: videos.length }).catch(() => {});
+  }).catch(() => {});
 }
 
 let updateTimer;
@@ -107,10 +250,10 @@ new MutationObserver(scheduleActionStateUpdate).observe(document.documentElement
   attributeFilter: ['src']
 });
 
-// background.jsからの動画一覧要求に応答する。同期で返せるためPromiseで包んで返す。
+// background.jsからの動画一覧要求に応答する。観測候補も含めて返す。
 browser.runtime.onMessage.addListener((message) => {
   if (message && message.type === 'getVideos') {
-    return Promise.resolve({ videos: collectVideoSources() });
+    return collectAllVideoSources().then((videos) => ({ videos }));
   }
   return undefined;
 });
@@ -244,7 +387,7 @@ async function showVideoList() {
     <div class="status">検出中...</div>
     <ul></ul>
   `;
-  const candidates = collectVideoSources()
+  const candidates = (await collectAllVideoSources())
     .map(async (video) => ({ video, sizeText: await getDisplaySize(video.url, findPageSize(video.url)) }));
   const sizedVideos = await Promise.all(candidates);
   const videos = sizedVideos
