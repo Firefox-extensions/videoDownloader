@@ -31,6 +31,10 @@
                                 "run_at":  "document_idle"
                             }
                         ],
+    "options_ui":  {
+                       "page":  "options/options.html",
+                       "open_in_tab":  true
+                   },
     "action":  {
                    "default_title":  "Video Downloader",
                    "default_icon":  {

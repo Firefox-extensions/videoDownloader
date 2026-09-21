@@ -1,0 +1,140 @@
+/* 設定画面のスタイル。ライト・ダークどちらでも読める配色にする。 */
+:root {
+  --accent: #1d4ed8;
+  --accent-text: #ffffff;
+  --border: rgba(128, 128, 140, 0.45);
+  --muted: rgba(90, 90, 105, 1);
+  --panel: rgba(128, 128, 140, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 24px;
+  font: 14px/1.6 system-ui, "Segoe UI", "Yu Gothic UI", sans-serif;
+  color: inherit;
+}
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+
+h2 {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+.lead {
+  margin: 0 0 20px;
+  color: var(--muted);
+}
+
+section {
+  padding: 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+input[type="number"] {
+  width: 120px;
+}
+
+input[type="number"],
+select,
+textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: Canvas;
+  color: inherit;
+  font: inherit;
+}
+
+textarea {
+  display: block;
+  width: 100%;
+  margin-bottom: 4px;
+  font: 13px/1.5 ui-monospace, Consolas, monospace;
+  resize: vertical;
+}
+
+.hint {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+fieldset {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+legend {
+  padding: 0 6px;
+  font-weight: 600;
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+  margin-bottom: 4px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: Canvas;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button[type="submit"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+button:hover {
+  filter: brightness(1.08);
+}
+
+.status {
+  min-height: 1.6em;
+  margin: 12px 0 0;
+  color: var(--muted);
+}

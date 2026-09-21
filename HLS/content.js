@@ -49,6 +49,99 @@ function isHlsUrl(url) {
   return lower.includes('.m3u8') || lower.includes('m3u8') || lower.includes('application/vnd.apple.mpegurl');
 }
 
+// 設定画面(options)で変更できる一覧フィルタ。値は storage.local に保存される。
+const FILTER_SETTINGS_KEY = 'videoDownloaderSettings';
+
+// 設定画面の初期値と同じ内容に保つこと(options/options.js の DEFAULTS)。
+const FILTER_DEFAULTS = {
+  minSizeValue: 1,
+  minSizeUnit: 'MB',
+  unknownSizePolicy: 'mediaOnly',
+  mediaExtensions: 'mp4, webm, m4v, mov, m3u8, mpd, ts, m4s, mp3, m4a, aac, ogg, wav',
+  excludeExtensions: 'js, mjs, css, html, htm, json, txt, xml, png, jpg, jpeg, gif, webp, svg, ico, woff, woff2, ttf, map, zip',
+  excludeUrlKeywords: '',
+  // サイズ取得の最終手段: off(ダウンロードしない) / download / full
+  sizeProbeMode: 'off',
+  // 一覧にサイズの取得方法を表示する
+  showSizeSource: false
+};
+
+// サイズの取得方法の表示名。どの手段で取得したかを一覧で確認できる。
+const SIZE_SOURCE_LABELS = {
+  page: 'ページ記載',
+  blob: 'メモリ内',
+  performance: '受信済み',
+  downloads: '保存履歴',
+  captured: '通信ヘッダー',
+  cache: '一時保存',
+  stored: '保存済み',
+  head: 'HEAD',
+  range: 'Range',
+  probe: '確認ダウンロード',
+  unknown: ''
+};
+
+let currentFilterSettings = { ...FILTER_DEFAULTS };
+
+// 保存済みの設定を読み込む。取得できない場合は初期値を使う。
+async function loadFilterSettings() {
+  try {
+    const stored = await browser.storage.local.get(FILTER_SETTINGS_KEY);
+    return { ...FILTER_DEFAULTS, ...(stored?.[FILTER_SETTINGS_KEY] || {}) };
+  } catch (error) {
+    return { ...FILTER_DEFAULTS };
+  }
+}
+
+// 設定を読み直し、同期的な検出処理から参照する変数へ反映する。
+function refreshFilterSettings() {
+  return loadFilterSettings().then((settings) => {
+    currentFilterSettings = settings;
+    return settings;
+  }).catch(() => currentFilterSettings);
+}
+
+// 「1MB」のような設定値をバイト数へ換算する。0のときはサイズで絞り込まない。
+function minSizeBytesOf(settings) {
+  const units = { B: 1, KB: 1024, MB: 1024 ** 2 };
+  const unit = units[String(settings.minSizeUnit || 'MB').toUpperCase()] || 1;
+  const value = Number(settings.minSizeValue);
+  return Number.isFinite(value) && value > 0 ? value * unit : 0;
+}
+
+// カンマ区切りの拡張子一覧を、正規表現で使える形へ変換する。
+function extensionsToPattern(extensions) {
+  return String(extensions || '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase().replace(/^\./, ''))
+    .filter(Boolean)
+    .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+}
+
+// 一覧へ載せる候補かどうかを判定する。.js や画像などは候補にしない。
+function isCandidateMediaUrl(url, settings = currentFilterSettings) {
+  const value = String(url || '');
+  if (!value) return false;
+
+  const excludePattern = extensionsToPattern(settings.excludeExtensions);
+  if (excludePattern && new RegExp(`\\.(?:${excludePattern})(?:$|[?#])`, 'i').test(value)) return false;
+
+  const keywords = String(settings.excludeUrlKeywords || '')
+    .split(',')
+    .map((keyword) => keyword.trim().toLowerCase())
+    .filter(Boolean);
+  if (keywords.some((keyword) => value.toLowerCase().includes(keyword))) return false;
+
+  const mediaPattern = extensionsToPattern(settings.mediaExtensions);
+  if (mediaPattern && new RegExp(`\\.(?:${mediaPattern})(?:$|[?#])`, 'i').test(value)) return true;
+
+  // 拡張子を持たないストリームURLは、動画らしい語を含む場合だけ候補にする。
+  return /(video|movie|media|stream|playlist|m3u8|720p|1080p|480p|360p)/i.test(value) && /^https?:\/\//i.test(value);
+}
+
+refreshFilterSettings();
+
 // video/source要素とページ内リンクから、直リンクとHLS候補を収集する。
 // 画質切替ボタンやJS設定値も拾い、切り替え操作なしで全画質を出す。
 function collectVideoSources() {
@@ -58,6 +151,8 @@ function collectVideoSources() {
   const addUrl = (sourceUrl, label = 'video', type = 'direct', qualityOverride = null) => {
     const normalized = sanitizeUrl(sourceUrl);
     if (!normalized || normalized.startsWith('blob:') || seen.has(normalized)) return;
+    // .js や画像など、動画以外のURLは候補にしない。
+    if (!isCandidateMediaUrl(normalized)) return;
 
     seen.add(normalized);
     results.push({
@@ -105,6 +200,7 @@ function collectVideoSources() {
   });
 
   return results;
+}
 
 // data-srcなどの遅延読み込み属性や画質切替ボタンの属性からURLを収集する。
 function collectLazyAndQualityAttributes(addUrl) {
@@ -213,6 +309,8 @@ async function collectAllVideoSources() {
   for (const item of observed) {
     const normalized = sanitizeUrl(item.url);
     if (!normalized || seen.has(normalized)) continue;
+    // 観測した候補にも一覧と同じ絞り込みを適用する。
+    if (!isCandidateMediaUrl(normalized)) continue;
     seen.add(normalized);
     domVideos.push({
       title: 'Video',
@@ -243,8 +341,6 @@ function looksLikeMediaUrl(value) {
   return /(video|movie|media|stream|m3u8|720p|1080p|480p|360p)/i.test(normalized) && /^https?:\/\//i.test(normalized);
 }
 
-}
-
 function findPageSize(url) {
   const elements = [...document.querySelectorAll('video, source, a')];
   const sizeAttributes = ['data-size', 'data-filesize', 'data-file-size', 'filesize', 'size'];
@@ -273,24 +369,8 @@ function updateActionState() {
   }).catch(() => {});
 }
 
-}
-
-// 候補数をbackground.jsへ通知し、拡張機能アイコンの状態を更新する。
-function updateActionStateOldUnused2b() {
-// 候補数をbackground.jsへ通知し、拡張機能アイコンの状態を更新する。
-// DOM候補と観測候補の合算で判定する。
-function updateActionStateNewUnused2b() {
-  collectAllVideoSources().then((videos) => {
-    browser.runtime.sendMessage({ type: 'videoCandidatesChanged', count: videos.length }).catch(() => {});
-  }).catch(() => {});
-}
-
-  const count = collectVideoSources().length;
-  browser.runtime.sendMessage({ type: 'videoCandidatesChanged', count }).catch(() => {});
-}
-
 let updateTimer;
-function scheduleActionStateUpdateUnused() {
+function scheduleActionStateUpdate() {
   clearTimeout(updateTimer);
   updateTimer = setTimeout(updateActionState, 200);
 }
@@ -314,19 +394,42 @@ browser.runtime.onMessage.addListener((message) => {
 
 const PANEL_ID = 'personal-video-downloader-panel';
 
+// ページが既に受信したリソースのサイズをPerformance APIから取得する。
+// 追加の通信を行わずにサイズが分かるため、最優先で使う。
+function pickPerformanceSize(url) {
+  try {
+    const target = sanitizeUrl(url) || url;
+    const withoutHash = target.split('#')[0];
+    let best = 0;
+    for (const entry of performance.getEntriesByType('resource')) {
+      const name = entry.name.split('#')[0];
+      if (name !== withoutHash && name !== target) continue;
+      const size = entry.encodedBodySize || entry.decodedBodySize || entry.transferSize || 0;
+      if (Number.isFinite(size) && size > best) best = size;
+    }
+    return best;
+  } catch (error) {
+    return 0;
+  }
+}
+
 // サイズ取得はbackground.jsへ依頼し、ページ側のCORS制限を避ける。
+// 取得できたサイズと取得方法を返す。
 async function getDisplaySize(url, knownSize = '') {
   if (knownSize) {
     const bytes = Number(knownSize);
-    return Number.isFinite(bytes) && bytes > 0 ? formatDisplayBytes(bytes) : knownSize;
+    return {
+      text: Number.isFinite(bytes) && bytes > 0 ? formatDisplayBytes(bytes) : knownSize,
+      source: 'page'
+    };
   }
   if (url.startsWith('blob:')) {
     try {
       const blobResponse = await fetch(url);
       const blob = await blobResponse.blob();
-      return formatDisplayBytes(blob.size);
+      return { text: formatDisplayBytes(blob.size), source: 'blob' };
     } catch (error) {
-      return '不明';
+      return { text: '不明', source: 'unknown' };
     }
   }
 
@@ -334,11 +437,12 @@ async function getDisplaySize(url, knownSize = '') {
     const response = await browser.runtime.sendMessage({
       type: 'getVideoSize',
       url,
-      pageUrl: window.location.href
+      pageUrl: window.location.href,
+      performanceSize: pickPerformanceSize(url)
     });
-    return response?.size || '不明';
+    return { text: response?.size || '不明', source: response?.sizeSource || 'unknown' };
   } catch (error) {
-    return '不明';
+    return { text: '不明', source: 'unknown' };
   }
 }
 
@@ -410,6 +514,8 @@ function handleOutsideClick(event) {
 
 // 動画候補をパネルへ描画し、保存・デバッグ・閉じる操作を登録する。
 async function showVideoList() {
+  // 設定画面の変更を反映するため、一覧を開くたびに設定を読み直す。
+  const settings = await refreshFilterSettings();
   const existing = document.getElementById(PANEL_ID);
   if (existing) {
     existing.remove();
@@ -427,6 +533,8 @@ async function showVideoList() {
       #personal-video-downloader-panel header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;font-size:18px;font-weight:600}
       #personal-video-downloader-panel button{border:1px solid #60a5fa;border-radius:6px;background:#1d4ed8;color:#fff;padding:8px 10px;cursor:pointer}
       #personal-video-downloader-panel .close{background:#1f2937;border-color:#4b5563;padding:4px 8px;font-size:12px;line-height:1.2}
+      #personal-video-downloader-panel .header-actions{display:flex;gap:8px}
+      #personal-video-downloader-panel .settings{background:#1f2937;border-color:#4b5563;padding:4px 8px;font-size:12px;line-height:1.2}
       #personal-video-downloader-panel ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
       #personal-video-downloader-panel li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:8px}
       #personal-video-downloader-panel .info{min-width:0;flex:1}
@@ -435,20 +543,32 @@ async function showVideoList() {
     </style>
     <header>
       <span>Video Downloader -HLS-</span>
-      <button class="close" type="button">閉じる</button>
+      <div class="header-actions">
+        <button class="settings" type="button">設定</button>
+        <button class="close" type="button">閉じる</button>
+      </div>
     </header>
     <div class="status">検出中...</div>
     <ul></ul>
   `;
   const candidates = collectVideoSources()
-    .map(async (video) => ({ video, sizeText: await getDisplaySize(video.url, findPageSize(video.url)) }));
+    .map(async (video) => {
+      const display = await getDisplaySize(video.url, findPageSize(video.url));
+      return { video, sizeText: display.text, sizeSource: display.source };
+    });
   const sizedVideos = await Promise.all(candidates);
+  const minSizeBytes = minSizeBytesOf(settings);
   const videos = sizedVideos
-    .filter(({ sizeText }) => {
+    .filter(({ sizeText, video }) => {
       const size = parseDisplaySize(sizeText);
-      return size === null || size > 100 * 1024;
+      if (size === null) {
+        // サイズ不明の候補は設定に従う。mediaOnly のときは動画らしいURLだけ残す。
+        return settings.unknownSizePolicy !== 'hide' && isCandidateMediaUrl(video.url, settings);
+      }
+      // 設定したサイズ以下の動画は一覧に出さない。
+      return minSizeBytes <= 0 || size > minSizeBytes;
     })
-    .map(({ video, sizeText }) => ({ ...video, sizeText }))
+    .map(({ video, sizeText, sizeSource }) => ({ ...video, sizeText, sizeSource }))
     .sort((a, b) => {
       const qualityA = parseInt((a.quality || '画質: 不明').match(/(\d{3,4})p/i)?.[1] || '0', 10);
       const qualityB = parseInt((b.quality || '画質: 不明').match(/(\d{3,4})p/i)?.[1] || '0', 10);
@@ -460,6 +580,11 @@ async function showVideoList() {
   panel.querySelector('.close').addEventListener('click', (event) => {
     event.stopPropagation();
     closeVideoList();
+  });
+  panel.querySelector('.settings').addEventListener('click', (event) => {
+    event.stopPropagation();
+    // 設定画面は background.js 経由で開く。content script からは直接開けないため。
+    browser.runtime.sendMessage({ type: 'openSettings' }).catch(() => {});
   });
   const status = panel.querySelector('.status');
   const list = panel.querySelector('ul');
@@ -484,7 +609,9 @@ async function showVideoList() {
     meta.className = 'meta';
     const qualityText = video.quality && video.quality !== '画質: 不明' ? video.quality.replace(/^画質:\s*/, '') : '不明';
     const sizeText = video.sizeText;
-    meta.textContent = `${video.type === 'hls' ? 'HLS' : '直接再生'} / 画質: ${qualityText} / サイズ: ${sizeText}`;
+    // 設定で有効なときだけ、サイズの取得方法を併記する。
+    const sizeSourceLabel = settings.showSizeSource ? SIZE_SOURCE_LABELS[video.sizeSource] || '' : '';
+    meta.textContent = `${video.type === 'hls' ? 'HLS' : '直接再生'} / 画質: ${qualityText} / サイズ: ${sizeText}${sizeSourceLabel ? `（${sizeSourceLabel}）` : ''}`;
 
     // 保存ボタンを押した時点で一覧を閉じ、保存処理をバックグラウンドへ渡す。
     const save = document.createElement('button');

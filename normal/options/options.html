@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>Video Downloader の設定</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <h1>Video Downloader の設定</h1>
+    <p class="lead">
+      動画候補の一覧に表示する条件を設定できます。設定は保存するとすぐ反映され、
+      次に一覧を開いたときから適用されます。
+    </p>
+
+    <form id="settings-form">
+      <section>
+        <h2>サイズによる絞り込み</h2>
+
+        <label for="min-size-value">このサイズ以下の動画を一覧に出さない</label>
+        <div class="inline">
+          <input type="number" id="min-size-value" min="0" step="0.1" value="1">
+          <select id="min-size-unit">
+            <option value="B">B</option>
+            <option value="KB">KB</option>
+            <option value="MB">MB</option>
+          </select>
+        </div>
+        <p class="hint">初期値は 1MB です。0 を指定するとサイズによる絞り込みを行いません。</p>
+
+        <fieldset>
+          <legend>サイズが取得できない候補の扱い</legend>
+          <label class="choice">
+            <input type="radio" name="unknown-size-policy" value="mediaOnly">
+            動画・音声の拡張子を持つものだけ表示する
+          </label>
+          <label class="choice">
+            <input type="radio" name="unknown-size-policy" value="hide">
+            表示しない
+          </label>
+          <label class="choice">
+            <input type="radio" name="unknown-size-policy" value="show">
+            常に表示する
+          </label>
+        </fieldset>
+      </section>
+
+      <section>
+        <h2>サイズの取得</h2>
+
+        <label for="size-probe-mode">サイズが取得できない場合の最終手段</label>
+        <select id="size-probe-mode">
+          <option value="off">行わない（ダウンロードしません・推奨）</option>
+          <option value="download">ダウンロード機能で確認する（履歴からも自動で削除します）</option>
+          <option value="full">本文をすべて取得して数える（通信量が大きくなります）</option>
+        </select>
+        <p class="hint">
+          サイズは、ページが受信した情報、通信ヘッダー(HEAD/Range)、保存履歴の順に取得します。
+          ここで選ぶのは、それでも分からない場合の最後の手段です。
+        </p>
+
+        <label class="choice">
+          <input type="checkbox" id="show-size-source">
+          一覧にサイズの取得方法を表示する
+        </label>
+        <p class="hint">例: サイズ: 12.3 MB（HEAD）</p>
+      </section>
+
+      <section>
+        <h2>拡張子による絞り込み</h2>
+
+        <label for="media-extensions">動画・音声として扱う拡張子（カンマ区切り）</label>
+        <textarea id="media-extensions" rows="3"></textarea>
+        <p class="hint">
+          拡張子を持たないURLは、URLに video / stream / 1080p などの語が含まれる場合だけ候補になります。
+        </p>
+
+        <label for="exclude-extensions">一覧に出さない拡張子（カンマ区切り）</label>
+        <textarea id="exclude-extensions" rows="3"></textarea>
+        <p class="hint">.js や画像など、動画以外のURLを候補から外すために使います。</p>
+
+        <label for="exclude-url-keywords">一覧に出さないURLキーワード（カンマ区切り・任意）</label>
+        <textarea id="exclude-url-keywords" rows="2"></textarea>
+      </section>
+
+      <div class="actions">
+        <button type="submit" id="save">保存</button>
+        <button type="button" id="reset">初期値に戻す</button>
+      </div>
+
+      <p id="status" class="status" role="status"></p>
+    </form>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

@@ -192,29 +192,38 @@ async function countResponseBytes(response) {
   return totalBytes;
 }
 
+// サイズの保存・参照に使うキー。URLの完全一致に加え、
+// ハッシュやクエリが違うだけのURLでもヒットするよう候補を増やす。
+function sizeKeyCandidates(url) {
+  const keys = [url];
+  try {
+    const withoutHash = url.split('#')[0];
+    keys.push(withoutHash);
+
+    const parsed = new URL(withoutHash);
+    if (parsed.search) {
+      parsed.search = '';
+      keys.push(parsed.href);
+    }
+  } catch (error) {
+    // なにもしない
+  }
+  return [...new Set(keys)];
+}
+
 // Content-LengthまたはContent-Rangeから、配信元が示した総サイズを保存する。
 function rememberMediaSize(url, headers, statusCode) {
   const size = getTotalSizeFromRange(headers) || (statusCode === 200 ? getSizeFromHeaders(headers) : 0);
 
   if (Number.isFinite(size) && size > 0) {
-    storeMediaSize(url, size);
-    try {
-      storeMediaSize(new URL(url).hash ? url.split('#')[0] : url, size);
-    } catch (error) {
-      // なにもしない
+    for (const key of sizeKeyCandidates(url)) {
+      storeMediaSize(key, size);
     }
   }
 }
 
 function getCachedMediaSize(url) {
-  const keys = [url];
-  try {
-    keys.push(url.split('#')[0]);
-  } catch (error) {
-    // なにもしない
-  }
-
-  for (const key of keys) {
+  for (const key of sizeKeyCandidates(url)) {
     const cached = mediaSizes.get(key);
     if (cached && Date.now() - cached.timestamp < 10 * 60 * 1000) return cached;
   }
@@ -226,12 +235,7 @@ function sizeStorageKey(url) {
 }
 
 async function getStoredMediaSize(url) {
-  const keys = [sizeStorageKey(url)];
-  try {
-    keys.push(sizeStorageKey(url.split('#')[0]));
-  } catch (error) {
-    // なにもしない
-  }
+  const keys = sizeKeyCandidates(url).map(sizeStorageKey);
   try {
     const stored = await browser.storage.local.get(keys);
     for (const key of keys) {
@@ -284,51 +288,17 @@ async function rememberCompletedDownloadSize(downloadId, sourceUrl) {
   }
 }
 
-async function probeDownloadSize(url, pageUrl = '') {
+// サイズ取得の最終手段。ダウンロードを伴うため、設定で許可されたときのみ実行する。
+// mode: 'off' は実行しない(既定) / 'download' はダウンロード機能で確認する /
+// 'full' は本文を読み切って数える(通信量が大きいため非推奨)。
+async function probeDownloadSize(url, pageUrl = '', mode = 'off') {
+  if (mode === 'off') return 0;
   if (/^(blob:|data:)/i.test(url)) return 0;
 
-  const fileName = `video-downloader-size-probe-${Date.now()}.mp4`;
-  let downloadId;
-  try {
-    if (pageUrl) pendingReferers.set(url, pageUrl);
-    downloadId = await browser.downloads.download({
-      url,
-      filename: fileName,
-      saveAs: false
-    });
-
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      const items = await browser.downloads.search({ id: downloadId });
-      const item = items[0];
-      if (item?.totalBytes > 0) return item.totalBytes;
-      if (item?.state === 'complete' && item?.downloadedBytes > 0) return item.downloadedBytes;
-      if (item?.state === 'interrupted') return 0;
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-  } catch (error) {
-    // ここでは抜けず、下のfetchによるフォールバックへ進む
-  } finally {
-    if (downloadId !== undefined) {
-      try {
-        await browser.downloads.cancel(downloadId);
-      } catch (error) {
-        // なにもしない
-      }
-      try {
-        await browser.downloads.removeFile(downloadId);
-      } catch (error) {
-        // なにもしない
-      }
-      try {
-        await browser.downloads.erase({ id: downloadId });
-      } catch (error) {
-        // なにもしない
-      }
-    }
+  if (mode === 'download') {
+    return probeDownloadApiSize(url, pageUrl);
   }
 
-  // 最終手段: fetchで実データを取得してバイト数を数える
-  // (サーバーがContent-Lengthを送らない場合でも使える)
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000);
@@ -355,6 +325,88 @@ async function probeDownloadSize(url, pageUrl = '') {
     // なにもしない
   }
   return 0;
+}
+
+// ダウンロード機能で総サイズを確認し、分かった時点で取り消す。
+// サイズが公開されない配信では本文を受信し続けるため、通信量が増える点に注意する。
+async function probeDownloadApiSize(url, pageUrl = '') {
+  const fileName = `video-downloader-size-probe-${Date.now()}.mp4`;
+  let downloadId;
+  try {
+    if (pageUrl) pendingReferers.set(url, pageUrl);
+    downloadId = await browser.downloads.download({
+      url,
+      filename: fileName,
+      saveAs: false
+    });
+
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const items = await browser.downloads.search({ id: downloadId });
+      const item = items[0];
+      if (!item) break;
+      if (item.totalBytes > 0) return item.totalBytes;
+      if (item.state === 'complete' && item.downloadedBytes > 0) return item.downloadedBytes;
+      if (item.state === 'interrupted') return 0;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  } catch (error) {
+    // サイズを確認できないまま終了する
+  } finally {
+    if (downloadId !== undefined) {
+      await discardProbeDownload(downloadId);
+    }
+  }
+  return 0;
+}
+
+// サイズ確認に使ったダウンロードを、履歴とディスクの両方から片付ける。
+// cancel → 状態の確定待ち → removeFile → erase の順で実行する。
+// removeFileをeraseより後に呼ぶと失敗するため、この順序を守る必要がある。
+async function discardProbeDownload(downloadId) {
+  const readItem = async () => {
+    try {
+      const items = await browser.downloads.search({ id: downloadId });
+      return items[0] || null;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  if (!(await readItem())) return;
+
+  // 進行中なら中止する。すでに終了している場合はそのまま後始末へ進む。
+  try {
+    await browser.downloads.cancel(downloadId);
+  } catch (error) {
+    // なにもしない
+  }
+
+  // 状態が確定するまで待つ(最大5秒)。進行中のままeraseすると消し損ねるため。
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const item = await readItem();
+    if (!item || item.state !== 'in_progress') break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  const item = await readItem();
+  if (item && item.exists !== false) {
+    try {
+      await browser.downloads.removeFile(downloadId);
+    } catch (error) {
+      // 中断などでファイルが無い場合は失敗するが、履歴の削除は続行する
+    }
+  }
+
+  try {
+    const erasedIds = await browser.downloads.erase({ id: downloadId });
+    // 削除が反映されず残った場合は、少し待ってもう一度だけ消す。
+    if (Array.isArray(erasedIds) && erasedIds.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await browser.downloads.erase({ id: downloadId });
+    }
+  } catch (error) {
+    // なにもしない
+  }
 }
 
 // 実際の動画レスポンスを通過させながら、一定サイズ以下ならメモリにも保持する。
@@ -407,9 +459,45 @@ browser.webRequest.onHeadersReceived.addListener(
   ['responseHeaders']
 );
 
-// サイズ取得は、実データ、過去のダウンロード、レスポンスヘッダーの順で試す。
-async function getRemoteFileSize(url, pageUrl = '') {
+// サイズ取得の最終手段の設定。設定画面の「サイズを取得するためのダウンロード」で変更する。
+// 初期値は 'off'(ダウンロードを行わない)。
+const SIZE_SETTINGS_KEY = 'videoDownloaderSettings';
+const SIZE_PROBE_MODES = ['off', 'download', 'full'];
+let sizeProbeMode = 'off';
+
+async function refreshSizeProbeMode() {
+  try {
+    const stored = await browser.storage.local.get(SIZE_SETTINGS_KEY);
+    const mode = stored?.[SIZE_SETTINGS_KEY]?.sizeProbeMode;
+    sizeProbeMode = SIZE_PROBE_MODES.includes(mode) ? mode : 'off';
+  } catch (error) {
+    sizeProbeMode = 'off';
+  }
+  return sizeProbeMode;
+}
+
+function getSizeProbeMode() {
+  return sizeProbeMode;
+}
+
+refreshSizeProbeMode();
+// 設定画面で変更されたら、次回の取得から反映する。
+browser.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === 'local' && changes[SIZE_SETTINGS_KEY]) {
+    refreshSizeProbeMode();
+  }
+});
+
+// サイズ取得は追加通信の少ない順に試す。既定では本文のダウンロードを行わない。
+// 取得方法は source として返し、一覧側で確認できるようにする。
+async function getRemoteFileSize(url, pageUrl = '', performanceSize = 0) {
   if (pageUrl) pendingReferers.set(url, pageUrl);
+
+  // ページが実際に受信したサイズ(Performance API)は追加通信なしで分かるため最優先で使う。
+  if (performanceSize > 0) {
+    storeMediaSize(url, performanceSize);
+    return { text: formatBytes(performanceSize), bytes: performanceSize, source: 'performance' };
+  }
 
   try {
     const downloads = await browser.downloads.search({ url });
@@ -420,7 +508,7 @@ async function getRemoteFileSize(url, pageUrl = '') {
     if (withKnownSize) {
       const size = withKnownSize.totalBytes > 0 ? withKnownSize.totalBytes : withKnownSize.downloadedBytes;
       storeMediaSize(url, size);
-      return formatBytes(size);
+      return { text: formatBytes(size), bytes: size, source: 'downloads' };
     }
   } catch (error) {
     // ダウンロード履歴が取得できなくても、サイズ確認は続行する
@@ -428,36 +516,37 @@ async function getRemoteFileSize(url, pageUrl = '') {
 
   const captured = capturedMedia.get(url);
   if (captured && Date.now() - captured.timestamp < 10 * 60 * 1000) {
-    return formatBytes(captured.size);
+    return { text: formatBytes(captured.size), bytes: captured.size, source: 'captured' };
   }
 
   const cached = getCachedMediaSize(url);
   if (cached) {
-    return formatBytes(cached.size);
+    return { text: formatBytes(cached.size), bytes: cached.size, source: 'cache' };
   }
 
   const stored = await getStoredMediaSize(url);
-  if (stored) return formatBytes(stored.size);
+  if (stored) return { text: formatBytes(stored.size), bytes: stored.size, source: 'stored' };
 
   const headResult = await tryHeadSize(url, pageUrl);
   if (headResult > 0) {
     storeMediaSize(url, headResult);
-    return formatBytes(headResult);
+    return { text: formatBytes(headResult), bytes: headResult, source: 'head' };
   }
 
   const rangeResult = await tryRangeSize(url, pageUrl);
   if (rangeResult > 0) {
     storeMediaSize(url, rangeResult);
-    return formatBytes(rangeResult);
+    return { text: formatBytes(rangeResult), bytes: rangeResult, source: 'range' };
   }
 
-  const probedSize = await probeDownloadSize(url, pageUrl);
+  // ダウンロードを伴う手段は、設定で明示的に許可されたときだけ実行する。
+  const probedSize = await probeDownloadSize(url, pageUrl, getSizeProbeMode());
   if (probedSize > 0) {
     storeMediaSize(url, probedSize);
-    return formatBytes(probedSize);
+    return { text: formatBytes(probedSize), bytes: probedSize, source: 'probe' };
   }
 
-  return '不明';
+  return { text: '不明', bytes: 0, source: 'unknown' };
 }
 
 // HEADリクエストでContent-Lengthの取得を試す。CORSで読めなくても例外にせず0を返す。
@@ -477,40 +566,45 @@ async function tryHeadSize(url, pageUrl) {
   }
 }
 
-// Rangeリクエスト(先頭1バイト)でContent-Rangeから総サイズの取得を試す。
+// RangeリクエストでContent-Rangeから総サイズの取得を試す。
 // 206応答でなく200応答が返った場合もContent-Lengthがあれば使う。
+// 応答本文は読まずに破棄する。読み切ると本文のダウンロードになってしまうため。
 async function tryRangeSize(url, pageUrl) {
-  let rangeResponse = null;
-  try {
-    rangeResponse = await fetch(url, {
-      headers: { Range: 'bytes=0-0' },
-      credentials: 'include',
-      referrer: pageUrl || undefined,
-      referrerPolicy: 'unsafe-url',
-      cache: 'no-store'
-    });
-    const rangeHeaders = [...rangeResponse.headers].map(([name, value]) => ({ name, value }));
-    const totalRangeSize = getTotalSizeFromRange(rangeHeaders);
-    if (totalRangeSize > 0) {
-      return totalRangeSize;
-    }
-
-    if (rangeResponse.status === 200) {
-      return getSizeFromHeaders(rangeHeaders);
-    }
-    return 0;
-  } catch (error) {
-    return 0;
-  } finally {
-    // Range応答のボディは最大1バイトだが、接続を残さないよう確実に消費する
+  // 一部の配信元は bytes=0-0 を拒否するため、開いた範囲も順に試す。
+  for (const rangeValue of ['bytes=0-0', 'bytes=0-']) {
+    let rangeResponse = null;
     try {
-      if (rangeResponse && rangeResponse.body) {
-        await rangeResponse.arrayBuffer().catch(() => {});
+      rangeResponse = await fetch(url, {
+        headers: { Range: rangeValue },
+        credentials: 'include',
+        referrer: pageUrl || undefined,
+        referrerPolicy: 'unsafe-url',
+        cache: 'no-store'
+      });
+      const rangeHeaders = [...rangeResponse.headers].map(([name, value]) => ({ name, value }));
+      const totalRangeSize = getTotalSizeFromRange(rangeHeaders);
+      if (totalRangeSize > 0) {
+        return totalRangeSize;
+      }
+
+      if (rangeResponse.status === 200) {
+        return getSizeFromHeaders(rangeHeaders);
       }
     } catch (error) {
-      // なにもしない
+      // 次のRange指定や後続の手段へ進む
+    } finally {
+      // 本文を読むと実データのダウンロードが発生するため、必ず破棄する。
+      try {
+        if (rangeResponse && rangeResponse.body) {
+          await rangeResponse.body.cancel();
+        }
+      } catch (error) {
+        // なにもしない
+      }
     }
   }
+
+  return 0;
 }
 
 // ページ読み込み開始時は、前ページの動画候補を示さない。
@@ -724,12 +818,14 @@ browser.runtime.onMessage.addListener((message, sender) => {
   if (message && message.type === 'getVideoSize') {
     return (async () => {
       try {
-        return {
-          ok: true,
-          size: await getRemoteFileSize(message.url, message.pageUrl || sender?.url || '')
-        };
+        const result = await getRemoteFileSize(
+          message.url,
+          message.pageUrl || sender?.url || '',
+          Number(message.performanceSize) || 0
+        );
+        return { ok: true, size: result.text, sizeSource: result.source };
       } catch (error) {
-        return { ok: true, size: '不明' };
+        return { ok: true, size: '不明', sizeSource: 'unknown' };
       }
     })();
   }
@@ -739,6 +835,14 @@ browser.runtime.onMessage.addListener((message, sender) => {
       videos: getMediaCandidates(sender?.tab?.id),
       hlsVideos: getHlsCandidates(sender?.tab?.id)
     });
+  }
+
+  if (message && message.type === 'openSettings') {
+    // 設定画面(options_ui)を開く。content scriptからは直接開けないため、ここで処理する。
+    return browser.runtime.openOptionsPage().then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error: error && error.message ? error.message : String(error) })
+    );
   }
 
   if (message && message.type === 'downloadVideo') {
