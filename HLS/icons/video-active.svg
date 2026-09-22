@@ -1,1 +1,50 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect x="3" y="5" width="26" height="22" rx="4" fill="#059669"/><path d="M10 11h8M10 16h8M10 21h8" stroke="#fff" stroke-width="2" stroke-linecap="round"/><path d="M21 12l5 4-5 4z" fill="#fff"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"
+ viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="35" y1="25" x2="220" y2="235" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#173A82"/>
+      <stop offset="1" stop-color="#071B45"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="128" y1="125" x2="128" y2="220" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#39D7F2"/>
+      <stop offset="1" stop-color="#147AF3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Transparent outside the rounded icon -->
+  <rect x="8" y="8" width="240" height="240" rx="42" fill="url(#bg)"/>
+
+  <!-- Film frame -->
+  <rect x="48" y="43" width="160" height="104" rx="17"
+        fill="#FFFFFF"/>
+  <rect x="69" y="58" width="118" height="74" rx="7"
+        fill="#071B45"/>
+
+  <!-- Film perforations -->
+  <g fill="#071B45">
+    <rect x="56" y="57" width="9" height="14" rx="3"/>
+    <rect x="56" y="79" width="9" height="14" rx="3"/>
+    <rect x="56" y="101" width="9" height="14" rx="3"/>
+    <rect x="191" y="57" width="9" height="14" rx="3"/>
+    <rect x="191" y="79" width="9" height="14" rx="3"/>
+    <rect x="191" y="101" width="9" height="14" rx="3"/>
+  </g>
+
+  <!-- Play -->
+  <path d="M104 72 L104 118 L145 95 Z" fill="#FFFFFF"/>
+
+  <!-- Download arrow -->
+  <path d="M116 119 H140 V151 H158 L128 181 L98 151 H116 Z"
+        fill="url(#arrow)"/>
+
+  <!-- Download tray -->
+  <path d="M75 164 V184 C75 194 83 201 93 201 H163 C173 201 181 194 181 184 V164"
+        stroke="url(#arrow)" stroke-width="16" stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  
+        <rect x="190" y="195" width="70" height="42" rx="12" fill="#147AF3"/>
+        <text x="225" y="224" text-anchor="middle"
+              font-family="Arial, Helvetica, sans-serif" font-size="25"
+              font-weight="700" fill="#FFFFFF">HLS</text>
+</svg>
