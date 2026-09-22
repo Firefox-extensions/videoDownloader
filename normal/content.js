@@ -169,6 +169,11 @@ function collectVideoSources() {
   // ページ内のJSON設定から画質別URLを収集する。
   collectEmbeddedPlayerUrls(addUrl);
 
+  // 画質切替ボタン・非表示候補・スクリプト設定から、押す前の全画質URLを収集する。
+  collectButtonQualityUrls(addUrl);
+  collectHiddenQualityUrls(addUrl);
+  collectQualityFromScripts(addUrl);
+
   return results;
 }
 
@@ -260,6 +265,274 @@ function collectUrlsFromText(text, label, addUrl) {
   const matches = String(text).match(/https?:\/\/[^\s"'<>]+\.(?:mp4|webm|m4v|mov)(?:[?#][^\s"'<>]*)?/gi) || [];
   for (const match of matches) {
     addUrl(match.replace(/\\\//g, '/'), label);
+  }
+}
+
+// JS文字列中のエスケープ(\/ や \u002F など)を戻し、URL断片として扱える形に整える。
+function decodeEmbeddedUrl(value) {
+  return String(value || '')
+    .replace(/\\u002f/gi, '/')
+    .replace(/\\x2f/gi, '/')
+    .replace(/\\\//g, '/')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\x26/gi, '&')
+    .replace(/\\u003d/gi, '=')
+    .replace(/\\x3d/gi, '=')
+    .replace(/\\u003f/gi, '?')
+    .replace(/\\x3f/gi, '?');
+}
+
+// 画質切替ボタンを押さなくても全画質を出すため、ボタン要素の属性を調べる。
+// 押す前からページに書かれているURLだけを拾う。
+function collectButtonQualityUrls(addUrl) {
+  const pickButtonLabel = (element) => {
+    const direct = element.getAttribute && (element.getAttribute('data-quality')
+      || element.getAttribute('data-label') || element.getAttribute('data-res')
+      || element.getAttribute('data-resolution') || element.getAttribute('aria-label')
+      || element.title || '');
+    if (direct && direct.trim()) return direct.trim();
+    const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text && text.length <= 40) return text;
+    const selected = element.querySelector && element.querySelector('option:checked, [data-quality], [data-label]');
+    if (selected && selected.textContent && selected.textContent.trim().length <= 40) {
+      return selected.textContent.replace(/\s+/g, ' ').trim();
+    }
+    return 'Video';
+  };
+
+  // 画質メニューがselect/option形式の場合に対応する。
+  document.querySelectorAll('select').forEach((select) => {
+    select.querySelectorAll('option').forEach((option) => {
+      const value = option.value || '';
+      if (value && looksLikeMediaUrl(value)) {
+        collectUrlsFromText(decodeEmbeddedUrl(value), option.textContent || 'Video', addUrl);
+      }
+    });
+  });
+
+  document.querySelectorAll('button, [role="button"], li, [data-quality], [data-label], [data-res], [aria-label]').forEach((element) => {
+    const attributes = element.attributes || [];
+    const decodedValues = [];
+    for (const attribute of attributes) {
+      if (!/^(src|href|data-)/i.test(attribute.name)) continue;
+      const raw = attribute.value || '';
+      if (!raw || raw.length > 4000) continue;
+      const decoded = decodeEmbeddedUrl(raw);
+      if (!looksLikeMediaUrl(decoded) && !/(mp4|webm|m3u8|720p|1080p|quality|resol|video|stream|source)/i.test(decoded)) continue;
+      decodedValues.push(decoded);
+    }
+    if (!decodedValues.length) return;
+    const label = pickButtonLabel(element);
+    for (const decoded of decodedValues) {
+      collectUrlsFromText(decoded, label, addUrl);
+    }
+  });
+}
+
+// DOM全体から、動画らしい属性を持つ要素のURLを拾う。
+// 非表示の画質候補やJSが読み替える前のdata-*も対象にする。
+function collectHiddenQualityUrls(addUrl) {
+  const root = document.body || document.documentElement;
+  if (!root || !root.getElementsByTagName) return;
+  const elements = root.getElementsByTagName('*');
+  const limit = Math.min(elements.length, 15000);
+
+  for (let index = 0; index < limit; index += 1) {
+    const element = elements[index];
+    const tagName = element.tagName || '';
+    if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|HEAD|META|LINK|OPTION|SELECT)$/.test(tagName)) continue;
+
+    const attributes = element.attributes || [];
+    const decodedValues = [];
+    for (const attribute of attributes) {
+      if (!/^(src|href|data-|poster)$/i.test(attribute.name)) continue;
+      const raw = attribute.value || '';
+      if (!raw || raw.length > 4000) continue;
+      const decoded = decodeEmbeddedUrl(raw);
+      if (!looksLikeMediaUrl(decoded) && !/(mp4|webm|m3u8|720p|1080p|quality|resol|video|stream|source)/i.test(decoded)) continue;
+      decodedValues.push(decoded);
+    }
+    if (!decodedValues.length && !element.srcset && !element.poster) continue;
+
+    const contextText = ((element.getAttribute && (element.getAttribute('data-quality')
+      || element.getAttribute('data-label') || element.getAttribute('data-res')
+      || element.getAttribute('data-resolution') || element.title || '')) || '').trim();
+    const ownText = (element.textContent || '').replace(/\s+/g, ' ').trim();
+    const label = contextText || (ownText && ownText.length <= 40 ? ownText : 'Video');
+
+    for (const decoded of decodedValues) {
+      collectUrlsFromText(decoded, label, addUrl);
+    }
+    if (element.srcset) collectSrcsetUrls(element.srcset, label, addUrl);
+    if (element.poster) collectUrlsFromText(decodeEmbeddedUrl(element.poster), label, addUrl);
+  }
+}
+
+// ページ内スクリプトから画質設定を探し、URLと画質名を組にして取り出す。
+function collectQualityFromScripts(addUrl) {
+  const keywordPattern = /(720p|1080p|480p|360p|2160p|1440p|quality|resolution|sources|file|video|stream|m3u8|\.mp4|\.webm)/i;
+  const scripts = document.querySelectorAll('script:not([src])');
+  for (const script of scripts) {
+    const text = script.textContent || '';
+    if (!text || text.length > 200000 || !keywordPattern.test(text)) continue;
+    const decoded = decodeEmbeddedUrl(text);
+    collectQualityScriptUrls(decoded, addUrl);
+    collectUrlsFromText(decoded, 'Video', addUrl);
+  }
+}
+
+// スクリプト断片からURLを抜き、近くの画質表記(720pなど)をラベルにする。
+function collectQualityScriptUrls(text, addUrl) {
+  if (!text) return;
+  const urlPattern = /https?:\/\/[^\s"'<>\\]+/gi;
+  let match = null;
+  while ((match = urlPattern.exec(text)) !== null) {
+    const url = match[0].replace(/[),;\s]+$/, '');
+    if (!looksLikeMediaUrl(url)) continue;
+    const start = Math.max(0, match.index - 160);
+    const end = Math.min(text.length, match.index + match[0].length + 160);
+    const context = text.slice(start, end);
+    const qualityMatch = context.match(/(\d{3,4})\s*p\b/i) || context.match(/\b(hd|fullhd|hq|sd|low|high)\b/i);
+    const label = qualityMatch ? qualityMatch[0] : 'Video';
+    collectUrlsFromText(url, label, addUrl);
+  }
+}
+
+// JS文字列中のエスケープ(\/ など)を戻し、URL断片として扱える形に整える。
+function decodeEmbeddedUrl(value) {
+  return String(value || '')
+    .split('\\u002f').join('/')
+    .split('\\u002F').join('/')
+    .split('\\x2f').join('/')
+    .split('\\x2F').join('/')
+    .replace(/\\\//g, '/')
+    .split('\\u0026').join('&')
+    .split('\\u0026').join('&')
+    .split('\\x26').join('&')
+    .split('\\x26').join('&')
+    .split('\\u003d').join('=')
+    .split('\\u003D').join('=')
+    .split('\\x3d').join('=')
+    .split('\\x3D').join('=')
+    .split('\\u003f').join('?')
+    .split('\\u003F').join('?')
+    .split('\\x3f').join('?')
+    .split('\\x3F').join('?');
+}
+
+// 画質切替ボタンを押さなくても全画質を出すため、ボタン要素の属性を調べる。
+// 押す前からページに書かれているURLだけを拾う。
+function collectButtonQualityUrls(addUrl) {
+  const pickButtonLabel = (element) => {
+    const direct = element.getAttribute && (element.getAttribute('data-quality')
+      || element.getAttribute('data-label') || element.getAttribute('data-res')
+      || element.getAttribute('data-resolution') || element.getAttribute('aria-label')
+      || element.title || '');
+    if (direct && direct.trim()) return direct.trim();
+    const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text && text.length <= 40) return text;
+    const selected = element.querySelector && element.querySelector('option:checked, [data-quality], [data-label]');
+    if (selected && selected.textContent && selected.textContent.trim().length <= 40) {
+      return selected.textContent.replace(/\s+/g, ' ').trim();
+    }
+    return 'Video';
+  };
+
+  // 画質メニューがselect/option形式の場合に対応する。
+  document.querySelectorAll('select').forEach((select) => {
+    select.querySelectorAll('option').forEach((option) => {
+      const value = option.value || '';
+      if (value && looksLikeMediaUrl(value)) {
+        collectUrlsFromText(decodeEmbeddedUrl(value), option.textContent || 'Video', addUrl);
+      }
+    });
+  });
+
+  document.querySelectorAll('button, [role="button"], li, [data-quality], [data-label], [data-res], [aria-label]').forEach((element) => {
+    const attributes = element.attributes || [];
+    const decodedValues = [];
+    for (const attribute of attributes) {
+      if (!/^(src|href|data-)/i.test(attribute.name)) continue;
+      const raw = attribute.value || '';
+      if (!raw || raw.length > 4000) continue;
+      const decoded = decodeEmbeddedUrl(raw);
+      if (!looksLikeMediaUrl(decoded) && !/(mp4|webm|m3u8|720p|1080p|quality|resol|video|stream|source)/i.test(decoded)) continue;
+      decodedValues.push(decoded);
+    }
+    if (!decodedValues.length) return;
+    const label = pickButtonLabel(element);
+    for (const decoded of decodedValues) {
+      collectUrlsFromText(decoded, label, addUrl);
+    }
+  });
+}
+
+// DOM全体から、動画らしい属性を持つ要素のURLを拾う。
+// 非表示の画質候補やJSが読み替える前のdata-*も対象にする。
+function collectHiddenQualityUrls(addUrl) {
+  const root = document.body || document.documentElement;
+  if (!root || !root.getElementsByTagName) return;
+  const elements = root.getElementsByTagName('*');
+  const limit = Math.min(elements.length, 15000);
+
+  for (let index = 0; index < limit; index += 1) {
+    const element = elements[index];
+    const tagName = element.tagName || '';
+    if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|HEAD|META|LINK|OPTION|SELECT)$/.test(tagName)) continue;
+
+    const attributes = element.attributes || [];
+    const decodedValues = [];
+    for (const attribute of attributes) {
+      if (!/^(src|href|data-|poster)$/i.test(attribute.name)) continue;
+      const raw = attribute.value || '';
+      if (!raw || raw.length > 4000) continue;
+      const decoded = decodeEmbeddedUrl(raw);
+      if (!looksLikeMediaUrl(decoded) && !/(mp4|webm|m3u8|720p|1080p|quality|resol|video|stream|source)/i.test(decoded)) continue;
+      decodedValues.push(decoded);
+    }
+    if (!decodedValues.length && !element.srcset && !element.poster) continue;
+
+    const contextText = ((element.getAttribute && (element.getAttribute('data-quality')
+      || element.getAttribute('data-label') || element.getAttribute('data-res')
+      || element.getAttribute('data-resolution') || element.title || '')) || '').trim();
+    const ownText = (element.textContent || '').replace(/\s+/g, ' ').trim();
+    const label = contextText || (ownText && ownText.length <= 40 ? ownText : 'Video');
+
+    for (const decoded of decodedValues) {
+      collectUrlsFromText(decoded, label, addUrl);
+    }
+    if (element.srcset) collectSrcsetUrls(element.srcset, label, addUrl);
+    if (element.poster) collectUrlsFromText(decodeEmbeddedUrl(element.poster), label, addUrl);
+  }
+}
+
+// ページ内スクリプトから画質設定を探し、URLと画質名を組にして取り出す。
+function collectQualityFromScripts(addUrl) {
+  const keywordPattern = /(720p|1080p|480p|360p|2160p|1440p|quality|resolution|sources|file|video|stream|m3u8|\.mp4|\.webm)/i;
+  const scripts = document.querySelectorAll('script:not([src])');
+  for (const script of scripts) {
+    const text = script.textContent || '';
+    if (!text || text.length > 200000 || !keywordPattern.test(text)) continue;
+    const decoded = decodeEmbeddedUrl(text);
+    collectQualityScriptUrls(decoded, addUrl);
+    collectUrlsFromText(decoded, 'Video', addUrl);
+  }
+}
+
+// スクリプト断片からURLを抜き、近くの画質表記(720pなど)をラベルにする。
+function collectQualityScriptUrls(text, addUrl) {
+  if (!text) return;
+  const urlPattern = /https?:\/\/[^\s"'<>\\]+/gi;
+  let match = null;
+  while ((match = urlPattern.exec(text)) !== null) {
+    const url = match[0].replace(/[),;\s]+$/, '');
+    if (!looksLikeMediaUrl(url)) continue;
+    const start = Math.max(0, match.index - 160);
+    const end = Math.min(text.length, match.index + match[0].length + 160);
+    const context = text.slice(start, end);
+    const qualityMatch = context.match(/(\d{3,4})\s*p\b/i) || context.match(/\b(hd|fullhd|hq|sd|low|high)\b/i);
+    const label = qualityMatch ? qualityMatch[0] : 'Video';
+    collectUrlsFromText(url, label, addUrl);
   }
 }
 
