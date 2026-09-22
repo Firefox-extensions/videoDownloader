@@ -276,126 +276,7 @@ async function rememberCompletedDownloadSize(downloadId, sourceUrl) {
   }
 }
 
-// サイズ取得の最終手段。ダウンロードを伴うため、設定で許可されたときのみ実行する。
-// mode: 'off' は実行しない(既定) / 'download' はダウンロード機能で確認する /
-// 'full' は本文を読み切って数える(通信量が大きいため非推奨)。
-async function probeDownloadSize(url, pageUrl = '', mode = 'off') {
-  if (mode === 'off') return 0;
-  if (/^(blob:|data:)/i.test(url)) return 0;
 
-  if (mode === 'download') {
-    return probeDownloadApiSize(url, pageUrl);
-  }
-
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-    try {
-      const response = await fetch(url, {
-        method: 'GET',
-        credentials: 'include',
-        referrer: pageUrl || undefined,
-        referrerPolicy: 'unsafe-url',
-        cache: 'no-store',
-        signal: controller.signal
-      });
-      if (response.ok && response.body) {
-        const bytes = await countResponseBytes(response);
-        if (bytes > 0) {
-          storeMediaSize(url, bytes);
-          return bytes;
-        }
-      }
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  } catch (error) {
-    // なにもしない
-  }
-  return 0;
-}
-
-// ダウンロード機能で総サイズを確認し、分かった時点で取り消す。
-// サイズが公開されない配信では本文を受信し続けるため、通信量が増える点に注意する。
-async function probeDownloadApiSize(url, pageUrl = '') {
-  const fileName = `video-downloader-size-probe-${Date.now()}.mp4`;
-  let downloadId;
-  try {
-    if (pageUrl) pendingReferers.set(url, pageUrl);
-    downloadId = await browser.downloads.download({
-      url,
-      filename: fileName,
-      saveAs: false
-    });
-
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      const items = await browser.downloads.search({ id: downloadId });
-      const item = items[0];
-      if (!item) break;
-      if (item.totalBytes > 0) return item.totalBytes;
-      if (item.state === 'complete' && item.downloadedBytes > 0) return item.downloadedBytes;
-      if (item.state === 'interrupted') return 0;
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-  } catch (error) {
-    // サイズを確認できないまま終了する
-  } finally {
-    if (downloadId !== undefined) {
-      await discardProbeDownload(downloadId);
-    }
-  }
-  return 0;
-}
-
-// サイズ確認に使ったダウンロードを、履歴とディスクの両方から片付ける。
-// cancel → 状態の確定待ち → removeFile → erase の順で実行する。
-// removeFileをeraseより後に呼ぶと失敗するため、この順序を守る必要がある。
-async function discardProbeDownload(downloadId) {
-  const readItem = async () => {
-    try {
-      const items = await browser.downloads.search({ id: downloadId });
-      return items[0] || null;
-    } catch (error) {
-      return null;
-    }
-  };
-
-  if (!(await readItem())) return;
-
-  // 進行中なら中止する。すでに終了している場合はそのまま後始末へ進む。
-  try {
-    await browser.downloads.cancel(downloadId);
-  } catch (error) {
-    // なにもしない
-  }
-
-  // 状態が確定するまで待つ(最大5秒)。進行中のままeraseすると消し損ねるため。
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const item = await readItem();
-    if (!item || item.state !== 'in_progress') break;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-
-  const item = await readItem();
-  if (item && item.exists !== false) {
-    try {
-      await browser.downloads.removeFile(downloadId);
-    } catch (error) {
-      // 中断などでファイルが無い場合は失敗するが、履歴の削除は続行する
-    }
-  }
-
-  try {
-    const erasedIds = await browser.downloads.erase({ id: downloadId });
-    // 削除が反映されず残った場合は、少し待ってもう一度だけ消す。
-    if (Array.isArray(erasedIds) && erasedIds.length === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      await browser.downloads.erase({ id: downloadId });
-    }
-  } catch (error) {
-    // なにもしない
-  }
-}
 
 // 実際の動画レスポンスを通過させながら、一定サイズ以下ならメモリにも保持する。
 // これにより、サイズヘッダーがない配信でも受信済みサイズを利用できる。
@@ -527,13 +408,8 @@ async function getRemoteFileSize(url, pageUrl = '', performanceSize = 0) {
     return { text: formatBytes(rangeResult), bytes: rangeResult, source: 'range' };
   }
 
-  // ダウンロードを伴う手段は、設定で明示的に許可されたときだけ実行する。
-  const probedSize = await probeDownloadSize(url, pageUrl, getSizeProbeMode());
-  if (probedSize > 0) {
-    storeMediaSize(url, probedSize);
-    return { text: formatBytes(probedSize), bytes: probedSize, source: 'probe' };
-  }
-
+  
+  // ダウンロードによるサイズ推定は行わない（一時保存表示を防止するため）。
   return { text: '不明', bytes: 0, source: 'unknown' };
 }
 

@@ -575,7 +575,12 @@ async function getDisplaySize(url, knownSize = '') {
       pageUrl: window.location.href,
       performanceSize: pickPerformanceSize(url)
     });
-    return { text: response?.size || '不明', source: response?.sizeSource || 'unknown' };
+        const sizeText = response?.size || '不明';
+    // Filter out temporary probe entries from the download list
+    if (sizeText.includes('Temporary Probe') || sizeText.includes('（一時保存）')) {
+      return { text: '不明', source: 'filtered' };
+    }
+    return { text: sizeText, source: response?.sizeSource || 'unknown' };
   } catch (error) {
     return { text: '不明', source: 'unknown' };
   }
