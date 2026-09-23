@@ -105,12 +105,21 @@ function isLikelyMediaUrl(url) {
   }
 }
 
+// Content-Typeから動画・音声の応答かどうかを判定する。
+// 拡張子がない動画URL(クエリ配信やハッシュ解決型)でも拾うために使う。
+function isMediaContentType(headers) {
+  const contentType = getHeaderValue(headers, 'content-type');
+  if (!contentType) return false;
+  return /^(video\/|audio\/|application\/x-mpegurl|application\/vnd\.apple\.mpegurl|application\/dash\+xml)/i.test(contentType.trim());
+}
+
 // ネットワークで観測した動画URLをタブごとの候補として残す。
 // 画質切替ボタン型のページではDOMに1件しかURLが出ないため、
-// 切り替え操作なしで全画質を一覧に出す目的で使う。
-function rememberMediaCandidate(url, tabId, statusCode = 200) {
+// ボタン押下で発生した通信を採取し、切り替え操作なしで全画質を一覧に出す目的で使う。
+function rememberMediaCandidate(url, tabId, statusCode = 200, headers = []) {
   if (tabId === undefined || tabId < 0) return;
-  if (!isLikelyMediaUrl(url)) return;
+  // 拡張子がなくても、応答のContent-Typeが動画・音声なら候補にする。
+  if (!isLikelyMediaUrl(url) && !isMediaContentType(headers)) return;
   if (statusCode !== 200 && statusCode !== 206) return;
 
   let candidates = mediaCandidates.get(tabId);
@@ -284,7 +293,7 @@ async function rememberCompletedDownloadSize(downloadId, sourceUrl) {
 browser.webRequest.onHeadersReceived.addListener(
   (details) => {
     rememberMediaSize(details.url, details.responseHeaders || [], details.statusCode);
-    rememberMediaCandidate(details.url, details.tabId, details.statusCode);
+    rememberMediaCandidate(details.url, details.tabId, details.statusCode, details.responseHeaders || []);
 
     if (details.statusCode !== 200 || !isDirectMediaUrl(details.url)) return;
 

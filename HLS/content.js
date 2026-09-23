@@ -510,7 +510,28 @@ function scheduleActionStateUpdate() {
   updateTimer = setTimeout(updateActionState, 200);
 }
 
+// 画質切替ボタン(.playbtn等)やプレイヤー要素の変化を監視する。
+// ボタン押下でvideo.srcが切り替わっても、MutationObserverの属性監視だけでは
+// プロパティ変更を検出できないため、playイベントでも候補数を更新する。
+// これにより、高画質ボタンを押した後の通信採取→一覧への反映が早くなる。
+function observePlayerSwitches() {
+  const handler = () => scheduleActionStateUpdate();
+  document.querySelectorAll('video').forEach((video) => {
+    video.addEventListener('play', handler);
+    video.addEventListener('loadeddata', handler);
+    video.addEventListener('emptied', handler);
+  });
+  document.querySelectorAll('button.playbtn, .playbtn, [data-src], [data-track]').forEach((button) => {
+    button.addEventListener('click', () => {
+      // 切替後の通信が発生してから候補を数え直すため、少し待ってから更新する。
+      setTimeout(scheduleActionStateUpdate, 500);
+      setTimeout(scheduleActionStateUpdate, 2000);
+    });
+  });
+}
+
 updateActionState();
+observePlayerSwitches();
 new MutationObserver(scheduleActionStateUpdate).observe(document.documentElement, {
   childList: true,
   subtree: true,
