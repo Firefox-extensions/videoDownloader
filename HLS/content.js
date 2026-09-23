@@ -142,6 +142,74 @@ function isCandidateMediaUrl(url, settings = currentFilterSettings) {
 
 refreshFilterSettings();
 
+// ハッシュ解決型の画質ボタン(.playbtn等)と解決後URLの対応を学習する。
+// data-src/data-trackがURLでない値でも、押下後の実URLと突き合わせて記録し、
+// 次回から押す前に出せるようにする。値はstorage.localに保存する。
+const PLAYBTN_MAP_KEY = 'playbtnHashMap';
+const PLAYBTN_MAP_TTL = 90 * 24 * 60 * 60 * 1000;
+
+async function loadPlaybtnMap() {
+  try {
+    const stored = await browser.storage.local.get(PLAYBTN_MAP_KEY);
+    const map = stored?.[PLAYBTN_MAP_KEY];
+    if (!map || typeof map !== 'object') return {};
+    const now = Date.now();
+    const cleaned = {};
+    for (const [key, entry] of Object.entries(map)) {
+      if (entry && entry.url && now - (entry.timestamp || 0) < PLAYBTN_MAP_TTL) {
+        cleaned[key] = entry;
+      }
+    }
+    return cleaned;
+  } catch (error) {
+    return {};
+  }
+}
+
+function savePlaybtnEntry(key, url, label) {
+  if (!key || !url) return;
+  loadPlaybtnMap().then((map) => {
+    map[key] = { url, label: label || '', timestamp: Date.now() };
+    const keys = Object.keys(map);
+    if (keys.length > 200) {
+      const oldest = keys.sort((a, b) => (map[a].timestamp || 0) - (map[b].timestamp || 0))[0];
+      if (oldest) delete map[oldest];
+    }
+    browser.storage.local.set({ [PLAYBTN_MAP_KEY]: map }).catch(() => {});
+  }).catch(() => {});
+}
+
+// .playbtn等のdata-src/data-track全文をハッシュとして集める。
+// URL正規表現では捨てられる値も、ここでは捨てずに保持する。
+function collectPlaybtnHashes() {
+  const hashes = [];
+  document.querySelectorAll('button.playbtn, .playbtn, [data-src], [data-track]').forEach((element) => {
+    const src = element.getAttribute && element.getAttribute('data-src');
+    const track = element.getAttribute && element.getAttribute('data-track');
+    const raw = [src, track].filter((value) => value && value.trim()).join('|');
+    if (!raw) return;
+    const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+    hashes.push({ key: raw, label: text && text.length <= 40 ? text : 'Video' });
+  });
+  return hashes;
+}
+
+// 保存済みマッピングと照合し、押す前から出せる解決済みURLを返す。
+async function getLearnedPlaybtnUrls() {
+  const hashes = collectPlaybtnHashes();
+  if (!hashes.length) return [];
+  const map = await loadPlaybtnMap();
+  const results = [];
+  const seen = new Set();
+  for (const { key, label } of hashes) {
+    const entry = map[key];
+    if (!entry || !entry.url || seen.has(entry.url)) continue;
+    seen.add(entry.url);
+    results.push({ url: entry.url, title: label, learned: true });
+  }
+  return results;
+}
+
 // video/source要素とページ内リンクから、直リンクとHLS候補を収集する。
 // 画質切替ボタンやJS設定値も拾い、切り替え操作なしで全画質を出す。
 function collectVideoSources() {
@@ -322,6 +390,21 @@ async function collectAllVideoSources() {
       url: normalized,
       type: item.type || (isHlsUrl(normalized) ? 'hls' : 'direct'),
       quality: inferQualityLabel(normalized, '')
+    });
+  }
+
+  // 過去に学習したハッシュ→URL対応を合流し、押す前から解決済みURLを出す。
+  const learned = await getLearnedPlaybtnUrls();
+  for (const item of learned) {
+    const normalized = sanitizeUrl(item.url);
+    if (!normalized || seen.has(normalized)) continue;
+    if (!isCandidateMediaUrl(normalized)) continue;
+    seen.add(normalized);
+    domVideos.push({
+      title: item.title || 'Video',
+      url: normalized,
+      type: item.type || (isHlsUrl(normalized) ? 'hls' : 'direct'),
+      quality: inferQualityLabel(normalized, item.title || '')
     });
   }
 
@@ -526,8 +609,34 @@ function observePlayerSwitches() {
       // 切替後の通信が発生してから候補を数え直すため、少し待ってから更新する。
       setTimeout(scheduleActionStateUpdate, 500);
       setTimeout(scheduleActionStateUpdate, 2000);
+      // 押したボタンのハッシュと、切替後に現れた実URLを突き合わせて学習する。
+      setTimeout(() => learnPlaybtnMapping(button), 1500);
+      setTimeout(() => learnPlaybtnMapping(button), 4000);
     });
   });
+}
+
+// 押したボタンのハッシュと、現在再生中の実URLを対応付けて保存する。
+// ハッシュが固定なら、次回から押す前に解決済みURLを出せる。
+function learnPlaybtnMapping(button) {
+  try {
+    const src = button.getAttribute && button.getAttribute('data-src');
+    const track = button.getAttribute && button.getAttribute('data-track');
+    const raw = [src, track].filter((value) => value && value.trim()).join('|');
+    if (!raw) return;
+    const video = document.querySelector('video');
+    const current = video
+      ? (video.currentSrc || video.src || '')
+      : '';
+    const source = current
+      || [...document.querySelectorAll('video source')].map((element) => element.src).find(Boolean)
+      || '';
+    if (!source || !isCandidateMediaUrl(source)) return;
+    const text = (button.textContent || '').replace(/\s+/g, ' ').trim();
+    savePlaybtnEntry(raw, sanitizeUrl(source) || source, text);
+  } catch (error) {
+    // 学習に失敗しても一覧表示には影響させない
+  }
 }
 
 updateActionState();
