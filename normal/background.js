@@ -532,7 +532,9 @@ async function startDownload(url, fileName, saveAs = true, waitForCompletion = f
   }
 }
 
-// まず直接URLを保存し、失敗した場合だけFetchしてBlob保存へ切り替える。
+// まず直接URLを保存し、保存要求自体が失敗した場合だけFetchしてBlob保存へ切り替える。
+// 注意: ダウンロード開始後に待機が失敗しても(タイムアウトなど)、2件目の保存は開始しない。
+// 開始済みのダウンロードと並行すると、同じ動画が2件保存されてしまうため。
 async function downloadDirectVideo(url, fileName, pageUrl) {
   if (pageUrl) pendingReferers.set(url, pageUrl);
 
@@ -548,41 +550,86 @@ async function downloadDirectVideo(url, fileName, pageUrl) {
     }
   }
 
+  let downloadId;
   try {
-    await startDownload(url, fileName, true, true, url);
-    return;
+    downloadId = await browser.downloads.download({ url, filename: fileName, saveAs: true });
   } catch (directError) {
-    try {
-      const response = await fetch(url, {
-        mode: 'cors',
-        credentials: 'include',
-        referrer: pageUrl || undefined,
-        referrerPolicy: 'unsafe-url'
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
-      }
-
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-
-      try {
-        await startDownload(objectUrl, fileName, false, true, url);
-      } finally {
-        URL.revokeObjectURL(objectUrl);
-      }
-
-      return;
-    } catch (fallbackError) {
-      const message = fallbackError && fallbackError.message
-        ? fallbackError.message
-        : directError && directError.message
-          ? directError.message
-          : 'Download failed.';
-      throw new Error(message);
-    }
+    // 保存要求自体が受け付けられなかった場合だけ、Fetchによる代替保存を試す。
+    // この時点では1件目のダウンロードは存在しないため、二重保存にはならない。
+    await downloadViaFetchFallback(url, fileName, pageUrl, directError);
+    return;
   }
+
+  try {
+    await waitForDownload(downloadId);
+    await rememberCompletedDownloadSize(downloadId, url);
+    return;
+  } catch (waitError) {
+    // 待機に失敗しても、1件目のダウンロードが生きていれば2件目は開始しない。
+    const items = await browser.downloads.search({ id: downloadId }).catch(() => []);
+    const state = items[0] ? items[0].state : '';
+    if (state === 'complete') {
+      await rememberCompletedDownloadSize(downloadId, url).catch(() => {});
+      return;
+    }
+    if (state === 'in_progress') {
+      return;
+    }
+    // 1件目が中断などで死んでいる場合だけ、代替保存で再試行する。
+    await downloadViaFetchFallback(url, fileName, pageUrl, waitError);
+  }
+}
+
+// Fetchで本文を取得してBlob保存する代替手段。呼び出し側で二重起動しないことを保証する。
+async function downloadViaFetchFallback(url, fileName, pageUrl, originalError) {
+  try {
+    const response = await fetch(url, {
+      mode: 'cors',
+      credentials: 'include',
+      referrer: pageUrl || undefined,
+      referrerPolicy: 'unsafe-url'
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    }
+
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    try {
+      await startDownload(objectUrl, fileName, false, true, url);
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+
+    return;
+  } catch (fallbackError) {
+    const message = fallbackError && fallbackError.message
+      ? fallbackError.message
+      : originalError && originalError.message
+        ? originalError.message
+        : 'Download failed.';
+    throw new Error(message);
+  }
+}
+
+// 動画ダウンロードの二重起動を防ぐための実行中管理。
+// ボタンの二重クリックやメッセージの二重送信があっても、
+// 同じURLのダウンロードは1件だけ実行する。
+const inFlightDownloads = new Map();
+
+function isDownloadInFlight(url) {
+  const startedAt = inFlightDownloads.get(url);
+  return startedAt !== undefined && Date.now() - startedAt < 10 * 60 * 1000;
+}
+
+function markDownloadStarted(url) {
+  inFlightDownloads.set(url, Date.now());
+}
+
+function markDownloadFinished(url) {
+  inFlightDownloads.delete(url);
 }
 
 // content.jsとダウンロード操作からのメッセージを処理する。
@@ -622,6 +669,12 @@ browser.runtime.onMessage.addListener((message, sender) => {
       return Promise.resolve({ ok: false, error: 'URL is missing.' });
     }
 
+    // ボタンの二重クリックなどで同じURLの要求が重なった場合は、2件目以降を実行しない。
+    if (isDownloadInFlight(url)) {
+      return Promise.resolve({ ok: true, deduplicated: true });
+    }
+    markDownloadStarted(url);
+
     return (async () => {
       const fileName = await getDefaultFileName(url, 'mp4', sender.tab?.title || '');
 
@@ -631,6 +684,8 @@ browser.runtime.onMessage.addListener((message, sender) => {
       } catch (error) {
         console.error(error);
         return { ok: false, error: buildDownloadFailureError(url, message.pageUrl || sender.tab?.url, error) };
+      } finally {
+        markDownloadFinished(url);
       }
     })();
   }
