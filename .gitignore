@@ -13,6 +13,8 @@ package.json
 /_tst
 /img
 .vscode/settings.json
+/HLS_legacy/
+/normal_legacy/
 normal/icons/_old
 HLS/icons/_old
 _bk_.git

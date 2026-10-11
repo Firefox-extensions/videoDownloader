@@ -33,6 +33,22 @@ function inferQualityLabel(url, title = '', element = null) {
   return '画質: 不明';
 }
 
+function parseHlsBandwidth(url, text = '') {
+  const match = text.match(/BANDWIDTH=(\d+)/i) || text.match(/(?:\b|_)(\d{4,7})(?=\s*(?:,|$))/i);
+  if (!match) return null;
+  const bandwidth = Number(match[1]);
+  if (!Number.isFinite(bandwidth) || bandwidth <= 0) return null;
+  const height = /RESOLUTION=(\d+)x(\d+)/i.exec(text)?.[2];
+  if (height) return { bandwidth, height: Number(height) };
+  return { bandwidth, height: null };
+}
+
+// URLやMIME情報から、候補がHLSプレイリストかどうかを判定する。
+function isHlsUrl(url) {
+  const lower = (url || '').toLowerCase();
+  return lower.includes('.m3u8') || lower.includes('m3u8') || lower.includes('application/vnd.apple.mpegurl');
+}
+
 // 設定画面(options)で変更できる一覧フィルタ。値は storage.local に保存される。
 const FILTER_SETTINGS_KEY = 'videoDownloaderSettings';
 
@@ -200,7 +216,7 @@ function collectVideoSources() {
   const seen = new Set();
   const results = [];
 
-  const addUrl = (sourceUrl, label = 'video', qualityOverride = null) => {
+  const addUrl = (sourceUrl, label = 'video', type = 'direct', qualityOverride = null) => {
     const normalized = sanitizeUrl(sourceUrl);
     if (!normalized || normalized.startsWith('blob:') || seen.has(normalized)) return;
     // .js や画像など、動画以外のURLは候補にしない。
@@ -210,7 +226,7 @@ function collectVideoSources() {
     results.push({
       title: label || 'Video',
       url: normalized,
-      type: 'direct',
+      type: type || (isHlsUrl(normalized) ? 'hls' : 'direct'),
       quality: qualityOverride || inferQualityLabel(normalized, label)
     });
   };
@@ -218,16 +234,16 @@ function collectVideoSources() {
   // video要素のsrc/currentSrc/source子要素から収集する。
   document.querySelectorAll('video').forEach((video) => {
     const quality = inferQualityLabel(video.currentSrc || video.src || '', video.title || '', video);
-    if (video.src) addUrl(video.src, video.title || 'Video', quality);
-    if (video.currentSrc) addUrl(video.currentSrc, video.title || 'Video', quality);
+    if (video.src) addUrl(video.src, video.title || 'Video', isHlsUrl(video.src) ? 'hls' : 'direct', quality);
+    if (video.currentSrc) addUrl(video.currentSrc, video.title || 'Video', isHlsUrl(video.currentSrc) ? 'hls' : 'direct', quality);
     video.querySelectorAll('source').forEach((source) => {
-      if (source.src) addUrl(source.src, source.title || 'Video', inferQualityLabel(source.src, source.title || '', video));
+      if (source.src) addUrl(source.src, source.title || 'Video', isHlsUrl(source.src) ? 'hls' : 'direct', inferQualityLabel(source.src, source.title || '', video));
       if (source.srcset) collectSrcsetUrls(source.srcset, source.title || 'Video', addUrl);
     });
   });
 
   document.querySelectorAll('source').forEach((source) => {
-    if (source.src) addUrl(source.src, source.title || 'Video', inferQualityLabel(source.src, source.title || ''));
+    if (source.src) addUrl(source.src, source.title || 'Video', isHlsUrl(source.src) ? 'hls' : 'direct', inferQualityLabel(source.src, source.title || ''));
     if (source.srcset) collectSrcsetUrls(source.srcset, source.title || 'Video', addUrl);
   });
 
@@ -241,6 +257,21 @@ function collectVideoSources() {
   collectButtonQualityUrls(addUrl);
   collectHiddenQualityUrls(addUrl);
   collectQualityFromScripts(addUrl);
+
+  Array.from(document.querySelectorAll('a, script')).forEach((element) => {
+    const value = element.src || element.href || '';
+    if (!isHlsUrl(value)) return;
+
+    const quality = (() => {
+      const text = element.textContent || element.innerHTML || '';
+      const meta = parseHlsBandwidth(value, text);
+      if (meta?.height) return `画質: ${meta.height}p`;
+      if (meta?.bandwidth) return `画質: ${Math.round(meta.bandwidth / 1000)}kbps`;
+      return inferQualityLabel(value, 'HLS Playlist');
+    })();
+
+    addUrl(value, 'HLS Playlist', 'hls', quality);
+  });
 
   return results;
 }
@@ -330,9 +361,10 @@ function collectUrlsFromJson(node, addUrl, depth = 0) {
 // テキスト断片からhttp(s)動画URLを抜き出す。
 function collectUrlsFromText(text, label, addUrl) {
   if (!text) return;
-  const matches = String(text).match(/https?:\/\/[^\s"'<>]+\.(?:mp4|webm|m4v|mov)(?:[?#][^\s"'<>]*)?/gi) || [];
+  const matches = String(text).match(/https?:\/\/[^\s"'<>]+\.(?:mp4|webm|m4v|mov|m3u8)(?:[?#][^\s"'<>]*)?/gi) || [];
   for (const match of matches) {
-    addUrl(match.replace(/\\\//g, '/'), label);
+    const cleaned = match.replace(/\\\//g, '/');
+    addUrl(cleaned, label, isHlsUrl(cleaned) ? 'hls' : 'direct');
   }
 }
 
@@ -639,7 +671,11 @@ async function getObservedVideos() {
   try {
     const response = await browser.runtime.sendMessage({ type: 'getObservedVideos' });
     const videos = response?.videos;
-    return Array.isArray(videos) ? videos : [];
+    const hlsVideos = response?.hlsVideos;
+    const merged = [];
+    if (Array.isArray(videos)) merged.push(...videos.map((url) => ({ url, type: 'direct' })));
+    if (Array.isArray(hlsVideos)) merged.push(...hlsVideos.map((url) => ({ url, type: 'hls' })));
+    return merged;
   } catch (error) {
     return [];
   }
@@ -825,16 +861,16 @@ async function collectAllVideoSources() {
   const seen = new Set(domVideos.map((video) => video.url));
   const observedUrls = await getObservedVideos();
 
-  for (const url of observedUrls) {
-    const normalized = sanitizeUrl(url);
+  for (const item of observedUrls) {
+    const normalized = sanitizeUrl(item.url || item);
     if (!normalized || seen.has(normalized)) continue;
-    // 観測した候補にも一覧と同じ絞り込みを適用する。
     if (!isCandidateMediaUrl(normalized)) continue;
     seen.add(normalized);
+    const type = item.type === 'hls' || isHlsUrl(normalized) ? 'hls' : 'direct';
     domVideos.push({
       title: 'Video',
       url: normalized,
-      type: 'direct',
+      type,
       quality: inferQualityLabel(normalized, '')
     });
   }
@@ -846,10 +882,11 @@ async function collectAllVideoSources() {
     if (!normalized || seen.has(normalized)) continue;
     if (!isCandidateMediaUrl(normalized)) continue;
     seen.add(normalized);
+    const type = isHlsUrl(normalized) ? 'hls' : 'direct';
     domVideos.push({
       title: item.title || 'Video',
       url: normalized,
-      type: 'direct',
+      type,
       quality: inferQualityLabel(normalized, item.title || '')
     });
   }

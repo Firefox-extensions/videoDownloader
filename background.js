@@ -83,6 +83,7 @@ function formatBytes(bytes) {
 const mediaSizes = new Map();
 const capturedMedia = new Map();
 const mediaCandidates = new Map();
+const hlsCandidates = new Map();
 const MAX_CAPTURE_BYTES = 256 * 1024 * 1024;
 const pendingReferers = new Map();
 
@@ -91,14 +92,19 @@ function isDirectMediaUrl(url) {
   return /\.(mp4|webm|m4v|mov)(?:$|[?#])/i.test(url);
 }
 
+// HLSプレイリストURLを判定する。
+function isHlsCandidateUrl(url) {
+  return /\.m3u8(?:$|[?#])/i.test(url || '');
+}
+
 // 拡張子がなくても動画の可能性があるURLを拾う。
 function isLikelyMediaUrl(url) {
   if (!url || /^(blob:|data:|javascript:|about:)/i.test(url)) return false;
-  if (isDirectMediaUrl(url)) return true;
+  if (isDirectMediaUrl(url) || isHlsCandidateUrl(url)) return true;
   try {
     const parsed = new URL(url);
     const target = `${parsed.pathname}${parsed.search}`.toLowerCase();
-    return /(video|movie|media|mp4|webm|m4v|mov|stream|download|play)/.test(target)
+    return /(video|movie|media|mp4|webm|m4v|mov|m3u8|stream|download|play)/.test(target)
       || /\/(240|360|480|720|1080|2160)p?([/?_.-]|$)/.test(target);
   } catch (error) {
     return false;
@@ -122,10 +128,11 @@ function rememberMediaCandidate(url, tabId, statusCode = 200, headers = []) {
   if (!isLikelyMediaUrl(url) && !isMediaContentType(headers)) return;
   if (statusCode !== 200 && statusCode !== 206) return;
 
-  let candidates = mediaCandidates.get(tabId);
+  const store = isHlsCandidateUrl(url) ? hlsCandidates : mediaCandidates;
+  let candidates = store.get(tabId);
   if (!candidates) {
     candidates = new Map();
-    mediaCandidates.set(tabId, candidates);
+    store.set(tabId, candidates);
   }
   const key = url.split('#')[0];
   const existing = candidates.get(key);
@@ -259,15 +266,23 @@ function storeMediaSize(url, size) {
   browser.storage.local.set({ [sizeStorageKey(url)]: value }).catch(() => {});
 }
 
-// 観測済み候補のうち直近のものを返す。タブIDがなければ空配列。
-function getMediaCandidates(tabId) {
+// 観測済み候補のうち直近のものを返す。
+function getRecentCandidates(store, tabId) {
   if (tabId === undefined || tabId < 0) return [];
-  const candidates = mediaCandidates.get(tabId);
+  const candidates = store.get(tabId);
   if (!candidates) return [];
   const now = Date.now();
   return [...candidates.values()]
     .filter((candidate) => now - candidate.timestamp < 30 * 60 * 1000)
     .map((candidate) => candidate.url);
+}
+
+function getMediaCandidates(tabId) {
+  return getRecentCandidates(mediaCandidates, tabId);
+}
+
+function getHlsCandidates(tabId) {
+  return getRecentCandidates(hlsCandidates, tabId);
 }
 
 async function rememberCompletedDownloadSize(downloadId, sourceUrl) {
@@ -485,6 +500,7 @@ async function tryRangeSize(url, pageUrl) {
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') {
     mediaCandidates.delete(tabId);
+    hlsCandidates.delete(tabId);
     setActionAvailability(tabId, false).catch(() => {});
   }
 });
@@ -492,6 +508,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // タブを閉じたときに観測候補を破棄する。
 browser.tabs.onRemoved.addListener((tabId) => {
   mediaCandidates.delete(tabId);
+  hlsCandidates.delete(tabId);
 });
 
 // content.jsからの候補数通知を受け、拡張機能ボタンの状態を更新する。
@@ -499,6 +516,94 @@ browser.runtime.onMessage.addListener((message, sender) => {
   if (message?.type !== 'videoCandidatesChanged' || !sender.tab?.id) return;
   setActionAvailability(sender.tab.id, message.count > 0).catch(() => {});
 });
+
+// HLSプレイリスト内の相対URLを絶対URLへ変換し、取得対象のセグメントだけを集める。
+function parsePlaylist(text, baseUrl) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const segments = [];
+
+  for (const line of lines) {
+    if (line.startsWith('#')) continue;
+    if (!line) continue;
+
+    const candidate = new URL(line, baseUrl).href;
+    const lower = candidate.toLowerCase();
+
+    if (lower.endsWith('.ts') || lower.endsWith('.m4s') || lower.endsWith('.mp4')) {
+      segments.push(candidate);
+    }
+  }
+
+  if (!segments.length) {
+    const urls = text.match(/https?:\/\/[^\s"']+/gi) || [];
+    for (const match of urls) {
+      const candidate = new URL(match, baseUrl).href;
+      const lower = candidate.toLowerCase();
+      if (lower.endsWith('.ts') || lower.endsWith('.m4s') || lower.endsWith('.mp4')) {
+        segments.push(candidate);
+      }
+    }
+  }
+
+  return [...new Set(segments)];
+}
+
+async function downloadHls(url, titleOverride = '', pageUrl = '') {
+  if (pageUrl) pendingReferers.set(url, pageUrl);
+
+  const requestOptions = {
+    mode: 'cors',
+    credentials: 'include',
+    referrer: pageUrl || undefined,
+    referrerPolicy: 'unsafe-url'
+  };
+  const playlistResponse = await fetch(url, requestOptions);
+  if (!playlistResponse.ok) {
+    throw new Error('Playlist fetch failed.');
+  }
+
+  const playlistText = await playlistResponse.text();
+  const segments = parsePlaylist(playlistText, url);
+
+  if (!segments.length) {
+    throw new Error('M3U8 にセグメントが見つかりません。');
+  }
+
+  const chunks = [];
+  for (const segmentUrl of segments) {
+    if (pageUrl) pendingReferers.set(segmentUrl, pageUrl);
+
+    try {
+      const response = await fetch(segmentUrl, requestOptions);
+      if (!response.ok) continue;
+      const buffer = await response.arrayBuffer();
+      chunks.push(new Uint8Array(buffer));
+    } catch (error) {
+      console.warn('Skipping segment', segmentUrl, error);
+    }
+  }
+
+  if (!chunks.length) {
+    throw new Error('セグメントを取得できませんでした。');
+  }
+
+  const fileName = await getDefaultFileName(url, 'ts', titleOverride);
+  const blob = new Blob(chunks, { type: 'video/mp2t' });
+  storeMediaSize(url, blob.size);
+  const objectUrl = URL.createObjectURL(blob);
+
+  try {
+    const downloadId = await browser.downloads.download({
+      url: objectUrl,
+      filename: fileName,
+      saveAs: true
+    });
+    await waitForDownload(downloadId);
+    await rememberCompletedDownloadSize(downloadId, url);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
 
 // downloads APIは開始要求と完了通知が別のため、完了または中断まで待機する。
 function waitForDownload(downloadId) {
@@ -661,7 +766,10 @@ browser.runtime.onMessage.addListener((message, sender) => {
   }
 
   if (message && message.type === 'getObservedVideos') {
-    return Promise.resolve({ videos: getMediaCandidates(sender?.tab?.id) });
+    return Promise.resolve({
+      videos: getMediaCandidates(sender?.tab?.id),
+      hlsVideos: getHlsCandidates(sender?.tab?.id)
+    });
   }
 
   if (message && message.type === 'openSettings') {
@@ -695,6 +803,30 @@ browser.runtime.onMessage.addListener((message, sender) => {
         return { ok: false, error: buildDownloadFailureError(url, message.pageUrl || sender.tab?.url, error) };
       } finally {
         markDownloadFinished(url);
+      }
+    })();
+  }
+
+  if (message && message.type === 'downloadHls') {
+    const hlsUrl = message.url;
+    if (!hlsUrl) {
+      return Promise.resolve({ ok: false, error: 'URL is missing.' });
+    }
+
+    if (isDownloadInFlight(hlsUrl)) {
+      return Promise.resolve({ ok: true, deduplicated: true });
+    }
+    markDownloadStarted(hlsUrl);
+
+    return (async () => {
+      try {
+        await downloadHls(hlsUrl, sender.tab?.title || '', message.pageUrl || sender.tab?.url);
+        return { ok: true };
+      } catch (error) {
+        console.error(error);
+        return { ok: false, error: buildDownloadFailureError(message.url, message.pageUrl || sender.tab?.url, error) || 'HLS download failed.' };
+      } finally {
+        markDownloadFinished(hlsUrl);
       }
     })();
   }
