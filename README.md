@@ -4,8 +4,7 @@ Firefox 用の動画ダウンロード拡張機能です。
 
 ## 構成
 
-- ルート直下の `manifest.json`、`background.js`、`content.js`、`options/`、`icons/` が統合版です。
-- `normal_legacy/` と `HLS_legacy/` は旧版のローカル保管用フォルダーで、`.gitignore` により Git の追跡対象外です。
+- 拡張機能のファイルはリポジトリ直下にあります。Firefox にはリポジトリ直下の `manifest.json` を読み込んでください。
 
 ## 主な機能
 
