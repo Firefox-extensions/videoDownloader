@@ -1,7 +1,7 @@
 {
     "manifest_version":  3,
     "name":  "Video Downloader",
-    "version":  "0.1.0",
+    "version":  "3.0.0",
     "description":  "Detects direct video URLs and HLS playlist URLs in webpages and downloads them for personal use.",
     "permissions":  [
                         "downloads",
