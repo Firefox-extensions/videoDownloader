@@ -348,7 +348,6 @@ browser.webRequest.onHeadersReceived.addListener(
   ['responseHeaders']
 );
 
-);
 
 
 
@@ -403,7 +402,7 @@ async function getRemoteFileSize(url, pageUrl = '', performanceSize = 0) {
     return { text: formatBytes(rangeResult), bytes: rangeResult, source: 'range' };
   }
 
-  
+
   // ダウンロードによるサイズ推定は行わない（一時保存表示を防止するため）。
   return { text: '不明', bytes: 0, source: 'unknown' };
 }

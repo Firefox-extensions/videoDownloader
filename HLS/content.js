@@ -1,4 +1,4 @@
-function sanitizeUrl(value) {
+﻿function sanitizeUrl(value) {
   if (!value) return null;
   try {
     return new URL(value, document.baseURI).href;
@@ -374,6 +374,181 @@ async function getObservedVideos() {
   }
 }
 
+const qualityExplorationCache = new Map();
+let qualityExplorationPromise = null;
+let qualityExplorationSignature = '';
+
+function getQualityControlLabel(element) {
+  return [
+    element.getAttribute && element.getAttribute('data-quality'),
+    element.getAttribute && element.getAttribute('data-resolution'),
+    element.getAttribute && element.getAttribute('data-res'),
+    element.getAttribute && element.getAttribute('aria-label'),
+    element.getAttribute && element.getAttribute('title'),
+    element.textContent
+  ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function isVisibleQualityControl(element) {
+  const target = element.tagName === 'OPTION' ? element.parentElement : element;
+  if (!target || element.disabled || target.disabled || target.getAttribute('aria-disabled') === 'true') return false;
+  const style = getComputedStyle(target);
+  return style.display !== 'none' && style.visibility !== 'hidden' && target.getClientRects().length > 0;
+}
+
+function isExplicitQualityControl(element) {
+  const label = getQualityControlLabel(element);
+  if (/(download|ダウンロード|保存|削除|remove|delete)/i.test(label)) return false;
+  const explicit = element.matches('.playbtn, [data-quality], [data-resolution], [data-res]');
+  const resolution = label.match(/\b(\d{3,4})p\b/i);
+  const namedQuality = /(低画質|高画質|\b(?:low|high)\b|\b(?:sd|hd|fhd|uhd)\b)/i.test(label)
+    || (resolution && Number(resolution[1]) >= 240 && Number(resolution[1]) <= 2160);
+  return (explicit || namedQuality) && isVisibleQualityControl(element);
+}
+
+function collectQualityControls() {
+  const controls = [];
+  const seen = new Set();
+  document.querySelectorAll('select').forEach((select) => {
+    select.querySelectorAll('option').forEach((option) => {
+      if (!isExplicitQualityControl(option) || seen.has(option)) return;
+      seen.add(option);
+      controls.push({ kind: 'option', element: option, select, label: getQualityControlLabel(option) });
+    });
+  });
+  document.querySelectorAll('button.playbtn, .playbtn, [data-quality], [data-resolution], [data-res], button, [role="button"]').forEach((element) => {
+    if (element.tagName === 'OPTION' || !isExplicitQualityControl(element) || seen.has(element)) return;
+    seen.add(element);
+    controls.push({ kind: 'button', element, label: getQualityControlLabel(element) });
+  });
+  return controls.slice(0, 12);
+}
+
+function qualityControlSignature(controls) {
+  return controls.map((control) => {
+    const value = control.kind === 'option' ? control.element.value : '';
+    return `${control.kind}:${control.label}:${value}`;
+  }).join('|');
+}
+
+function isSelectedQualityControl(element) {
+  return element.matches(':checked, .active, .selected, .current')
+    || element.getAttribute('aria-pressed') === 'true'
+    || element.getAttribute('aria-checked') === 'true'
+    || element.getAttribute('aria-current') === 'true'
+    || element.getAttribute('data-state') === 'active';
+}
+
+function rememberExploredVideoUrls(label) {
+  document.querySelectorAll('video').forEach((video) => {
+    const urls = [video.src, video.currentSrc];
+    video.querySelectorAll('source').forEach((source) => urls.push(source.src));
+    urls.forEach((url) => {
+      const normalized = sanitizeUrl(url);
+      if (!normalized || normalized.startsWith('blob:') || !isCandidateMediaUrl(normalized)) return;
+      qualityExplorationCache.set(normalized, {
+        title: label || video.title || 'Video',
+        url: normalized,
+        type: isHlsUrl(normalized) ? 'hls' : 'direct',
+        quality: inferQualityLabel(normalized, label || '', video)
+      });
+    });
+  });
+}
+
+function waitForQualitySwitch() {
+  return new Promise((resolve) => setTimeout(resolve, 180));
+}
+
+async function exploreQualityControls() {
+  const controls = collectQualityControls();
+  const signature = qualityControlSignature(controls);
+  if (!controls.length || signature === qualityExplorationSignature) return [...qualityExplorationCache.values()];
+  if (qualityExplorationPromise) return qualityExplorationPromise;
+
+  qualityExplorationPromise = (async () => {
+    const selectValues = new Map();
+    const selectedButtons = [];
+    const videoStates = [...document.querySelectorAll('video')].map((video) => ({
+      video,
+      src: video.getAttribute('src'),
+      sources: [...video.querySelectorAll('source')].map((source) => ({
+        source,
+        src: source.getAttribute('src')
+      })),
+      paused: video.paused,
+      currentTime: video.currentTime
+    }));
+    controls.forEach((control) => {
+      if (control.kind === 'option') selectValues.set(control.select, control.select.value);
+      else if (isSelectedQualityControl(control.element)) selectedButtons.push(control.element);
+    });
+
+    rememberExploredVideoUrls('Video');
+    try {
+      for (const control of controls) {
+        if (control.kind === 'option') {
+          control.select.value = control.element.value;
+          control.select.dispatchEvent(new Event('input', { bubbles: true }));
+          control.select.dispatchEvent(new Event('change', { bubbles: true }));
+        } else {
+          control.element.click();
+        }
+        await waitForQualitySwitch();
+        rememberExploredVideoUrls(control.label);
+        videoStates.forEach(({ video, paused }) => {
+          if (!paused) return;
+          try { video.load(); } catch (error) { /* なにもしない */ }
+        });
+        await waitForQualitySwitch();
+        rememberExploredVideoUrls(control.label);
+      }
+    } finally {
+      selectValues.forEach((value, select) => {
+        select.value = value;
+        select.dispatchEvent(new Event('input', { bubbles: true }));
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      selectedButtons.forEach((button) => {
+        if (!isSelectedQualityControl(button)) button.click();
+      });
+      await waitForQualitySwitch();
+      const exploredButtons = controls.some((control) => control.kind === 'button');
+      const restoredButtons = selectedButtons.length > 0
+        && selectedButtons.every((button) => isSelectedQualityControl(button));
+      if (exploredButtons && !restoredButtons) {
+        videoStates.forEach(({ video, src, sources }) => {
+          let sourceChanged = false;
+          const restoreSrc = (element, value) => {
+            if (element.getAttribute('src') === value) return;
+            sourceChanged = true;
+            if (value === null) element.removeAttribute('src');
+            else element.setAttribute('src', value);
+          };
+          restoreSrc(video, src);
+          sources.forEach(({ source, src: sourceSrc }) => restoreSrc(source, sourceSrc));
+          if (sourceChanged) {
+            try { video.load(); } catch (error) { /* なにもしない */ }
+          }
+        });
+        await waitForQualitySwitch();
+      }
+      videoStates.forEach(({ video, paused, currentTime }) => {
+        if (!paused) return;
+        try {
+          video.pause();
+          if (Number.isFinite(currentTime)) video.currentTime = currentTime;
+        } catch (error) { /* なにもしない */ }
+      });
+      qualityExplorationSignature = signature;
+    }
+    return [...qualityExplorationCache.values()];
+  })().finally(() => {
+    qualityExplorationPromise = null;
+  });
+  return qualityExplorationPromise;
+}
+
 async function collectAllVideoSources() {
   const domVideos = collectVideoSources();
   const seen = new Set(domVideos.map((video) => video.url));
@@ -406,6 +581,12 @@ async function collectAllVideoSources() {
       type: item.type || (isHlsUrl(normalized) ? 'hls' : 'direct'),
       quality: inferQualityLabel(normalized, item.title || '')
     });
+  }
+
+  for (const item of qualityExplorationCache.values()) {
+    if (seen.has(item.url) || !isCandidateMediaUrl(item.url)) continue;
+    seen.add(item.url);
+    domVideos.push(item);
   }
 
   return domVideos;
@@ -651,7 +832,9 @@ new MutationObserver(scheduleActionStateUpdate).observe(document.documentElement
 // background.jsからの動画一覧要求に応答する。観測候補も含めて返す。
 browser.runtime.onMessage.addListener((message) => {
   if (message && message.type === 'getVideos') {
-    return collectAllVideoSources().then((videos) => ({ videos }));
+    return exploreQualityControls()
+      .then(() => collectAllVideoSources())
+      .then((videos) => ({ videos }));
   }
   return undefined;
 });
@@ -821,6 +1004,7 @@ async function showVideoList() {
     <div class="status">検出中...</div>
     <ul></ul>
   `;
+  await exploreQualityControls();
   const candidates = (await collectAllVideoSources())
     .map(async (video) => {
       const display = await getDisplaySize(video.url, findPageSize(video.url));

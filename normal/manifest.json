@@ -9,8 +9,7 @@
                         "webRequestBlocking",
                         "activeTab",
                         "tabs",
-                        "storage",
-                        "scripting"
+                        "storage"
                     ],
     "host_permissions":  [
                              "\u003call_urls\u003e"

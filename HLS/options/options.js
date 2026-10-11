@@ -9,6 +9,7 @@ const DEFAULTS = {
   mediaExtensions: 'mp4, webm, m4v, mov, m3u8, mpd, ts, m4s, mp3, m4a, aac, ogg, wav',
   excludeExtensions: 'js, mjs, css, html, htm, json, txt, xml, png, jpg, jpeg, gif, webp, svg, ico, woff, woff2, ttf, map, zip',
   excludeUrlKeywords: '',
+  sizeProbeMode: 'off',
   showSizeSource: false
 };
 
@@ -19,6 +20,7 @@ const minSizeUnit = document.getElementById('min-size-unit');
 const mediaExtensions = document.getElementById('media-extensions');
 const excludeExtensions = document.getElementById('exclude-extensions');
 const excludeUrlKeywords = document.getElementById('exclude-url-keywords');
+const sizeProbeMode = document.getElementById('size-probe-mode');
 const showSizeSource = document.getElementById('show-size-source');
 
 // 保存済みの設定をフォームへ反映する。
@@ -28,6 +30,7 @@ function applySettings(settings) {
   mediaExtensions.value = settings.mediaExtensions;
   excludeExtensions.value = settings.excludeExtensions;
   excludeUrlKeywords.value = settings.excludeUrlKeywords;
+  sizeProbeMode.value = settings.sizeProbeMode;
 
   const policy = settings.unknownSizePolicy;
   for (const radio of document.querySelectorAll('input[name="unknown-size-policy"]')) {

@@ -50,8 +50,15 @@
 
         <p class="hint">
           サイズは、ページが受信した情報、通信ヘッダー(HEAD/Range)、保存履歴の順に取得します。
-          ダウンロードによるサイズ推定は行いません（一時保存表示を防止するため）。
+          ここで選ぶのは、それでも分からない場合の最後の手段です。
         </p>
+
+        <label for="size-probe-mode">サイズが取得できない場合の最終手段</label>
+        <select id="size-probe-mode">
+          <option value="off">行わない（ダウンロードしません・推奨）</option>
+          <option value="download">ダウンロード機能で確認する（履歴からも自動で削除します）</option>
+          <option value="full">本文をすべて取得して数える（通信量が大きくなります）</option>
+        </select>
 
         <label class="choice">
           <input type="checkbox" id="show-size-source">
