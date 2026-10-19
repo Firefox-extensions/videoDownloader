@@ -1163,6 +1163,13 @@ async function showVideoList() {
       if (qualityA !== qualityB) return qualityB - qualityA;
       return (b.url || '').length - (a.url || '').length;
     });
+  const seenFileNames = new Set();
+  const uniqueVideos = videos.filter((video) => {
+    const fileName = getDisplayName(video.url).toLowerCase();
+    if (seenFileNames.has(fileName)) return false;
+    seenFileNames.add(fileName);
+    return true;
+  });
   document.documentElement.appendChild(panel);
   document.addEventListener('click', handleOutsideClick, true);
   panel.querySelector('.close').addEventListener('click', (event) => {
@@ -1177,14 +1184,14 @@ async function showVideoList() {
   const status = panel.querySelector('.status');
   const list = panel.querySelector('ul');
 
-  if (!videos.length) {
+  if (!uniqueVideos.length) {
     status.textContent = '動画候補はありません。';
     return;
   }
 
-  status.textContent = `${videos.length} 件の動画候補を表示しています。`;
+  status.textContent = `${uniqueVideos.length} 件の動画候補を表示しています。`;
 
-  for (const [index, video] of videos.entries()) {
+  for (const [index, video] of uniqueVideos.entries()) {
     const item = document.createElement('li');
     const info = document.createElement('div');
     info.className = 'info';
